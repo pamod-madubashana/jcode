@@ -839,7 +839,7 @@ pub async fn run_telegram_command(
                         continue;
                     }
 
-                    crate::telegram::send_plain_message(
+                    let progress_message_id = crate::telegram::send_plain_message_and_get_id(
                         &client,
                         &bot_token,
                         &chat_id,
@@ -850,15 +850,22 @@ pub async fn run_telegram_command(
                     match run_single_message_command_capture_with_auto_poke(&mut agent, text).await
                     {
                         Ok(reply) => {
-                            send_telegram_reply_chunks(&client, &bot_token, &chat_id, &reply)
-                                .await?;
-                        }
-                        Err(err) => {
-                            crate::logging::error(&format!("Telegram command failed: {err:?}"));
-                            crate::telegram::send_plain_message(
+                            send_telegram_reply_chunks(
                                 &client,
                                 &bot_token,
                                 &chat_id,
+                                progress_message_id,
+                                &reply,
+                            )
+                            .await?;
+                        }
+                        Err(err) => {
+                            crate::logging::error(&format!("Telegram command failed: {err:?}"));
+                            send_telegram_reply_chunks(
+                                &client,
+                                &bot_token,
+                                &chat_id,
+                                progress_message_id,
                                 &format!("❌ Jcode failed: {err:#}"),
                             )
                             .await?;
@@ -875,30 +882,52 @@ pub async fn run_telegram_command(
     }
 }
 
+const TELEGRAM_REPLY_MAX_CHARS: usize = 3900;
+
 async fn send_telegram_reply_chunks(
     client: &reqwest::Client,
     bot_token: &str,
     chat_id: &str,
+    message_id: i64,
     text: &str,
 ) -> Result<()> {
-    const MAX_CHARS: usize = 3900;
-    if text.trim().is_empty() {
-        crate::telegram::send_plain_message(client, bot_token, chat_id, "✅ Done.").await?;
+    let mut chunks = chunk_telegram_reply_text(text).into_iter();
+    let Some(first_chunk) = chunks.next() else {
         return Ok(());
+    };
+
+    if let Err(err) =
+        crate::telegram::edit_plain_message(client, bot_token, chat_id, message_id, &first_chunk)
+            .await
+    {
+        crate::logging::error(&format!("Telegram message edit failed: {err:?}"));
+        crate::telegram::send_plain_message(client, bot_token, chat_id, &first_chunk).await?;
     }
 
+    for chunk in chunks {
+        crate::telegram::send_plain_message(client, bot_token, chat_id, &chunk).await?;
+    }
+
+    Ok(())
+}
+
+fn chunk_telegram_reply_text(text: &str) -> Vec<String> {
+    if text.trim().is_empty() {
+        return vec!["✅ Done.".to_string()];
+    }
+
+    let mut chunks = Vec::new();
     let mut chunk = String::new();
     for ch in text.chars() {
-        if chunk.len() + ch.len_utf8() > MAX_CHARS {
-            crate::telegram::send_plain_message(client, bot_token, chat_id, &chunk).await?;
-            chunk.clear();
+        if chunk.len() + ch.len_utf8() > TELEGRAM_REPLY_MAX_CHARS {
+            chunks.push(std::mem::take(&mut chunk));
         }
         chunk.push(ch);
     }
     if !chunk.is_empty() {
-        crate::telegram::send_plain_message(client, bot_token, chat_id, &chunk).await?;
+        chunks.push(chunk);
     }
-    Ok(())
+    chunks
 }
 
 fn run_command_auto_poke_enabled() -> bool {

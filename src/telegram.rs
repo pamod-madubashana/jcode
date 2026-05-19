@@ -19,6 +19,8 @@ pub struct Update {
 
 #[derive(Debug, Deserialize)]
 pub struct TelegramMessage {
+    #[serde(default)]
+    pub message_id: i64,
     pub text: Option<String>,
     pub chat: Chat,
     #[serde(rename = "date")]
@@ -69,11 +71,67 @@ pub async fn send_plain_message(
     chat_id: &str,
     text: &str,
 ) -> anyhow::Result<()> {
+    let _ = send_plain_message_inner(client, bot_token, chat_id, text).await?;
+    logging::info("Telegram plain message sent");
+    Ok(())
+}
+
+pub async fn send_plain_message_and_get_id(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+) -> anyhow::Result<i64> {
+    let message = send_plain_message_inner(client, bot_token, chat_id, text).await?;
+    logging::info("Telegram plain message sent");
+    Ok(message.message_id)
+}
+
+async fn send_plain_message_inner(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+) -> anyhow::Result<TelegramMessage> {
     let url = format!("{}{}/sendMessage", API_BASE, bot_token);
     let resp = client
         .post(&url)
         .json(&serde_json::json!({
             "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": true,
+        }))
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body: TelegramResponse<TelegramMessage> = resp.json().await?;
+
+    if !body.ok {
+        anyhow::bail!(
+            "Telegram API error ({}): {}",
+            status,
+            body.description.unwrap_or_default()
+        );
+    }
+
+    body.result
+        .ok_or_else(|| anyhow::anyhow!("Telegram API returned no message payload"))
+}
+
+pub async fn edit_plain_message(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    message_id: i64,
+    text: &str,
+) -> anyhow::Result<()> {
+    let url = format!("{}{}/editMessageText", API_BASE, bot_token);
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
             "text": text,
             "disable_web_page_preview": true,
         }))
@@ -91,7 +149,7 @@ pub async fn send_plain_message(
         );
     }
 
-    logging::info("Telegram plain message sent");
+    logging::info("Telegram plain message edited");
     Ok(())
 }
 
@@ -157,6 +215,21 @@ mod tests {
         let resp: TelegramResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
         assert!(resp.ok);
         assert!(resp.result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_send_message_response() {
+        let json = r#"{
+            "ok": true,
+            "result": {
+                "message_id": 42,
+                "text": "hello",
+                "chat": {"id": 456},
+                "date": 1700000000
+            }
+        }"#;
+        let resp: TelegramResponse<TelegramMessage> = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.result.unwrap().message_id, 42);
     }
 
     #[test]

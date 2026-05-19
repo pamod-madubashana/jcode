@@ -468,3 +468,25 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
 
     assert_eq!(resumed.session_id(), original_session_id);
 }
+
+#[test]
+fn telegram_reply_chunking_returns_done_for_empty_output() {
+    assert_eq!(
+        chunk_telegram_reply_text("   \n\t  "),
+        vec!["✅ Done.".to_string()]
+    );
+}
+
+#[test]
+fn telegram_reply_chunking_splits_long_output() {
+    let text = "a".repeat(TELEGRAM_REPLY_MAX_CHARS + 25);
+    let chunks = chunk_telegram_reply_text(&text);
+
+    assert_eq!(chunks.concat(), text);
+    assert_eq!(chunks.len(), 2);
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.len() <= TELEGRAM_REPLY_MAX_CHARS)
+    );
+}
