@@ -1,5 +1,9 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use anyhow::{Context, Result};
+#[cfg(unix)]
 use serde_json::json;
+#[cfg(unix)]
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -13,6 +17,7 @@ mod events;
 mod server_io;
 mod terminal;
 
+#[cfg(unix)]
 use server_io::{
     DrainOutcome, connect_server_with_retry, connect_server_with_retry_path, drain_session_events,
     ensure_server_running, establish_session_id, read_history_reasoning_effort, read_model_catalog,

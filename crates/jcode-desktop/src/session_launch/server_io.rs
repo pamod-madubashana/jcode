@@ -1,23 +1,34 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use anyhow::{Context, Result};
+#[cfg(unix)]
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::io::{self, BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::mpsc::Receiver;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use super::events::{
     desktop_event_from_server_value, history_reasoning_effort_from_server_value,
     model_catalog_event_from_server_value,
 };
+#[cfg(unix)]
 use super::terminal::jcode_bin;
+#[cfg(unix)]
 use super::{
     DesktopSessionCommand, DesktopSessionEvent, DesktopSessionEventSender,
     SERVER_CONNECT_RETRY_DELAY, SERVER_START_TIMEOUT, send_desktop_event_ref, socket_path,
 };
 
+#[cfg(unix)]
 pub(super) fn ensure_server_running() -> Result<()> {
     if UnixStream::connect(socket_path()).is_ok() {
         return Ok(());
@@ -32,6 +43,11 @@ pub(super) fn ensure_server_running() -> Result<()> {
         .context("failed to spawn jcode serve")?;
 
     connect_server_with_retry(SERVER_START_TIMEOUT).map(|_| ())
+}
+
+#[cfg(not(unix))]
+pub(super) fn ensure_server_running() -> Result<()> {
+    anyhow::bail!("desktop server sessions are not implemented on this platform yet")
 }
 
 #[cfg(unix)]
@@ -563,6 +579,7 @@ pub(super) fn drain_session_events(
     }
 }
 
+#[cfg(unix)]
 fn parse_server_event_line(line: &str, context: &str) -> Result<Value> {
     match serde_json::from_str::<Value>(line.trim()) {
         Ok(value) => Ok(value),

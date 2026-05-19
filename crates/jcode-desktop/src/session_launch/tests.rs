@@ -1,3 +1,5 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use super::events::desktop_event_from_server_value;
 use super::*;
 use serde_json::{Value, json};
