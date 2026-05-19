@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! End-to-end tests for jcode using a mock provider
 //!
 //! These tests verify the full flow from user input to response
@@ -15,6 +17,7 @@ pub(crate) use jcode::server;
 pub(crate) use jcode::session::{Session, StoredCompactionState};
 pub(crate) use jcode::tool::Registry;
 pub(crate) use std::ffi::OsString;
+#[cfg(unix)]
 pub(crate) use std::io::Read;
 pub(crate) use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]

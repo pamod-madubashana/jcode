@@ -1,9 +1,10 @@
+#![allow(dead_code)]
+
 use super::{
     build_resume_command, clear_ambient_info_cache_for_tests, extract_bracketed_system_message,
     format_countdown_until, gather_ambient_info, partition_queued_messages, resume_invocation_args,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
-use crate::terminal_launch::{detected_resume_terminal, shell_command};
 use crate::tui::session_picker::ResumeTarget;
 use chrono::{Duration as ChronoDuration, Utc};
 

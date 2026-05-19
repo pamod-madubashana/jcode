@@ -350,7 +350,6 @@ struct BuildLockGuard {
 
 type SelfDevBuildCommand = build::SelfDevBuildCommand;
 
-#[cfg(unix)]
 impl Drop for BuildLockGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);

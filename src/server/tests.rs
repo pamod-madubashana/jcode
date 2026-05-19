@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::{
     FileAccess, Server, SessionInterruptQueues, SwarmMember, dispatch_background_task_completion,
     file_activity_scope_label, persist_swarm_state_snapshot,

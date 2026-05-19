@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::{AutomationRequest, request_status, run_server, send_request};
     use anyhow::{Result, anyhow};

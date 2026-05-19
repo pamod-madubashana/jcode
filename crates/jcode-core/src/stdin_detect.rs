@@ -23,7 +23,7 @@ pub fn is_waiting_for_stdin(pid: u32) -> StdinState {
 pub mod linux {
     use super::*;
 
-    pub fn check(pid: u32) -> StdinState {
+    pub fn check(_pid: u32) -> StdinState {
         check_inner(pid, false)
     }
 
@@ -183,7 +183,7 @@ mod macos {
 
     const TH_STATE_WAITING: i32 = 2;
 
-    pub fn check(pid: u32) -> StdinState {
+    pub fn check(_pid: u32) -> StdinState {
         // Check if fd 0 (stdin) is a pipe or pty
         if !stdin_is_interactive(pid as i32) {
             return StdinState::NotReading;
@@ -279,7 +279,7 @@ mod macos {
 mod windows {
     use super::*;
 
-    pub fn check(pid: u32) -> StdinState {
+    pub fn check(_pid: u32) -> StdinState {
         // Windows: use NtQueryInformationThread to check thread state
         // A process blocked on ReadFile/ReadConsole on stdin will have
         // its thread in a Wait state with a wait reason of UserRequest

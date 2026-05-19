@@ -1,7 +1,12 @@
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use super::App;
+#[cfg(unix)]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::UnboundedReceiver;
+#[cfg(unix)]
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 #[cfg(unix)]
 use std::io::{Read, Write};

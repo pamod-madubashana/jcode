@@ -1,6 +1,8 @@
+#![allow(dead_code)]
+
 use super::{
-    ClientCandidate, extract_session_short_name_from_window_title, focused_jcode_session,
-    last_focused_session, normalize_session_short_name, parse_ppid, read_resumed_session_id,
+    ClientCandidate, extract_session_short_name_from_window_title, last_focused_session,
+    normalize_session_short_name, parse_ppid, read_resumed_session_id,
     remember_last_focused_session, run_command, select_candidate,
 };
 use std::ffi::OsString;

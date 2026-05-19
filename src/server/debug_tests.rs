@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod tests {
     use super::super::*;
     use crate::server::debug_jobs::DebugJobStatus;

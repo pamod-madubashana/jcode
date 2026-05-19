@@ -12,7 +12,7 @@ use crate::storage;
 use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::io::Write;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -543,6 +543,7 @@ pub fn run_setup_launcher() -> Result<()> {
 ///
 /// - Windows: creates a .lnk shortcut on the Desktop
 /// - macOS: creates a jcode.app bundle in ~/Applications/
+#[cfg_attr(windows, allow(dead_code))]
 fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
     #[cfg(windows)]
     {

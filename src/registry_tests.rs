@@ -1,6 +1,5 @@
 use super::*;
 use crate::storage::lock_test_env;
-use crate::transport::Listener;
 use std::ffi::OsString;
 
 fn test_server_info(name: &str) -> ServerInfo {
