@@ -77,6 +77,22 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             )
             .await?;
         }
+        Some(Command::Telegram {
+            bot_token,
+            chat_id,
+            timeout_secs,
+            session,
+        }) => {
+            Box::pin(commands::run_telegram_command(
+                &args.provider,
+                args.model.as_deref(),
+                bot_token,
+                chat_id,
+                timeout_secs,
+                session.or(args.resume),
+            ))
+            .await?;
+        }
         Some(Command::Login {
             account,
             no_browser,

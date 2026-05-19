@@ -122,6 +122,25 @@ pub(crate) enum Command {
         message: String,
     },
 
+    /// Run Jcode from Telegram by polling Bot API updates
+    Telegram {
+        /// Telegram bot token. Defaults to JCODE_TELEGRAM_BOT_TOKEN or safety.telegram_bot_token.
+        #[arg(long)]
+        bot_token: Option<String>,
+
+        /// Allowed Telegram chat ID. Defaults to JCODE_TELEGRAM_CHAT_ID or safety.telegram_chat_id.
+        #[arg(long)]
+        chat_id: Option<String>,
+
+        /// Telegram long-poll timeout in seconds
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+
+        /// Resume an existing Jcode session for the Telegram conversation
+        #[arg(long)]
+        session: Option<String>,
+    },
+
     /// Login to a provider via OAuth, API key, or local credentials
     Login {
         /// Account label for multi-account support (stored labels are auto-numbered)

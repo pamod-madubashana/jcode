@@ -46,7 +46,7 @@ fn configure_system_allocator() {
 #[cfg(not(all(target_os = "linux", not(feature = "jemalloc"))))]
 fn configure_system_allocator() {}
 
-fn main() -> Result<()> {
+fn run_main() -> Result<()> {
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -55,4 +55,19 @@ fn main() -> Result<()> {
         .build()?;
 
     runtime.block_on(async { jcode::run().await })
+}
+
+#[cfg(windows)]
+fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .name("jcode-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_main)?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+#[cfg(not(windows))]
+fn main() -> Result<()> {
+    run_main()
 }

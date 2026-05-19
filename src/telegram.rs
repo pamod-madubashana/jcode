@@ -63,6 +63,38 @@ pub async fn send_message(
     Ok(())
 }
 
+pub async fn send_plain_message(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+) -> anyhow::Result<()> {
+    let url = format!("{}{}/sendMessage", API_BASE, bot_token);
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": true,
+        }))
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body: TelegramResponse<serde_json::Value> = resp.json().await?;
+
+    if !body.ok {
+        anyhow::bail!(
+            "Telegram API error ({}): {}",
+            status,
+            body.description.unwrap_or_default()
+        );
+    }
+
+    logging::info("Telegram plain message sent");
+    Ok(())
+}
+
 pub async fn get_updates(
     client: &reqwest::Client,
     bot_token: &str,
@@ -86,11 +118,13 @@ pub async fn get_updates(
         .send()
         .await?;
 
+    let status = resp.status();
     let body: TelegramResponse<Vec<Update>> = resp.json().await?;
 
     if !body.ok {
         anyhow::bail!(
-            "Telegram getUpdates error: {}",
+            "Telegram getUpdates error ({}): {}",
+            status,
             body.description.unwrap_or_default()
         );
     }
@@ -123,5 +157,20 @@ mod tests {
         let resp: TelegramResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
         assert!(resp.ok);
         assert!(resp.result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_channel_post_is_ignored() {
+        let json = r#"{
+            "update_id": 124,
+            "channel_post": {
+                "text": "hello channel",
+                "chat": {"id": -100123},
+                "date": 1700000001
+            }
+        }"#;
+        let update: Update = serde_json::from_str(json).unwrap();
+        assert_eq!(update.update_id, 124);
+        assert!(update.message.is_none());
     }
 }

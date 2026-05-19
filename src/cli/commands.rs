@@ -759,6 +759,148 @@ pub async fn run_single_message_command(
     Ok(())
 }
 
+pub async fn run_telegram_command(
+    choice: &super::provider_init::ProviderChoice,
+    model: Option<&str>,
+    bot_token: Option<String>,
+    chat_id: Option<String>,
+    timeout_secs: u64,
+    resume_session: Option<String>,
+) -> Result<()> {
+    let config = crate::config::config();
+    let bot_token = bot_token
+        .or_else(|| std::env::var("JCODE_TELEGRAM_BOT_TOKEN").ok())
+        .or_else(|| config.safety.telegram_bot_token.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Telegram bot token missing. Pass --bot-token, set JCODE_TELEGRAM_BOT_TOKEN, or set safety.telegram_bot_token."
+            )
+        })?;
+    let chat_id = chat_id
+        .or_else(|| std::env::var("JCODE_TELEGRAM_CHAT_ID").ok())
+        .or_else(|| config.safety.telegram_chat_id.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Telegram chat id missing. Pass --chat-id, set JCODE_TELEGRAM_CHAT_ID, or set safety.telegram_chat_id."
+            )
+        })?;
+
+    let provider = super::provider_init::init_provider_quiet(choice, model).await?;
+    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+    restore_agent_session_if_requested(&mut agent, resume_session.as_deref())?;
+
+    let client = crate::provider::shared_http_client();
+    let poll_timeout = timeout_secs.clamp(1, 120);
+    let mut offset: Option<i64> = None;
+
+    println!(
+        "Telegram polling started for chat {} with session {}",
+        chat_id,
+        agent.session_id()
+    );
+    let _ = crate::telegram::send_plain_message(
+        &client,
+        &bot_token,
+        &chat_id,
+        &format!(
+            "🤖 Jcode Telegram bridge is online. Session: {}\nSend a message to run Jcode.",
+            agent.session_id()
+        ),
+    )
+    .await;
+
+    loop {
+        match crate::telegram::get_updates(&client, &bot_token, offset, poll_timeout).await {
+            Ok(updates) => {
+                for update in updates {
+                    offset = Some(update.update_id + 1);
+                    let Some(message) = update.message else {
+                        continue;
+                    };
+                    if message.chat.id.to_string() != chat_id {
+                        continue;
+                    }
+                    let Some(text) = message.text else {
+                        continue;
+                    };
+                    let text = text.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if matches!(text, "/start" | "/help") {
+                        crate::telegram::send_plain_message(
+                            &client,
+                            &bot_token,
+                            &chat_id,
+                            "Send any prompt and Jcode will run it in this persistent session. Use Ctrl+C in the terminal to stop polling.",
+                        )
+                        .await?;
+                        continue;
+                    }
+
+                    crate::telegram::send_plain_message(
+                        &client,
+                        &bot_token,
+                        &chat_id,
+                        "⏳ Jcode is working on your message...",
+                    )
+                    .await?;
+
+                    match run_single_message_command_capture_with_auto_poke(&mut agent, text).await
+                    {
+                        Ok(reply) => {
+                            send_telegram_reply_chunks(&client, &bot_token, &chat_id, &reply)
+                                .await?;
+                        }
+                        Err(err) => {
+                            crate::logging::error(&format!("Telegram command failed: {err:?}"));
+                            crate::telegram::send_plain_message(
+                                &client,
+                                &bot_token,
+                                &chat_id,
+                                &format!("❌ Jcode failed: {err:#}"),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                crate::logging::error(&format!("Telegram polling failed: {err:?}"));
+                eprintln!("Telegram polling failed: {err:#}. Retrying in 10s...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+    }
+}
+
+async fn send_telegram_reply_chunks(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+) -> Result<()> {
+    const MAX_CHARS: usize = 3900;
+    if text.trim().is_empty() {
+        crate::telegram::send_plain_message(client, bot_token, chat_id, "✅ Done.").await?;
+        return Ok(());
+    }
+
+    let mut chunk = String::new();
+    for ch in text.chars() {
+        if chunk.len() + ch.len_utf8() > MAX_CHARS {
+            crate::telegram::send_plain_message(client, bot_token, chat_id, &chunk).await?;
+            chunk.clear();
+        }
+        chunk.push(ch);
+    }
+    if !chunk.is_empty() {
+        crate::telegram::send_plain_message(client, bot_token, chat_id, &chunk).await?;
+    }
+    Ok(())
+}
+
 fn run_command_auto_poke_enabled() -> bool {
     std::env::var("JCODE_RUN_AUTO_POKE")
         .ok()
