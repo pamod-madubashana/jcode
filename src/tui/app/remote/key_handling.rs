@@ -441,7 +441,7 @@ async fn handle_remote_key_internal(
             }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
-                    remote.cancel().await?;
+                    remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
                     app.set_status_notice("Interrupting...");
                 } else {
                     app.handle_quit_request();
@@ -1850,7 +1850,7 @@ async fn handle_remote_key_internal(
                                 app_mod::commands::build_improve_resume_prompt(mode, &incomplete);
 
                             if app.is_processing {
-                                remote.cancel().await?;
+                                remote.cancel_with_reason("slash_improve_resume").await?;
                                 app.set_status_notice("Interrupting for /improve resume...");
                                 app.push_display_message(DisplayMessage::system(format!(
                                     "♻️ Interrupting and resuming {}...",
@@ -1916,7 +1916,7 @@ async fn handle_remote_key_internal(
                             app.improve_mode = None;
                             let stop_prompt = app_mod::commands::improve_stop_prompt();
                             if app.is_processing {
-                                remote.cancel().await?;
+                                remote.cancel_with_reason("slash_improve_stop").await?;
                                 app.set_status_notice("Interrupting for /improve stop...");
                                 app.push_display_message(DisplayMessage::system(
                                     app_mod::commands::improve_stop_notice(true),
@@ -1951,7 +1951,7 @@ async fn handle_remote_key_internal(
                                 focus.as_deref(),
                             );
                             if app.is_processing {
-                                remote.cancel().await?;
+                                remote.cancel_with_reason("slash_improve_run").await?;
                                 app.set_status_notice(if plan_only {
                                     "Interrupting for /improve plan..."
                                 } else {
@@ -2032,7 +2032,7 @@ async fn handle_remote_key_internal(
                                 app_mod::commands::build_refactor_resume_prompt(mode, &incomplete);
 
                             if app.is_processing {
-                                remote.cancel().await?;
+                                remote.cancel_with_reason("slash_refactor_resume").await?;
                                 app.set_status_notice("Interrupting for /refactor resume...");
                                 app.push_display_message(DisplayMessage::system(format!(
                                     "♻️ Interrupting and resuming {}...",
@@ -2098,7 +2098,7 @@ async fn handle_remote_key_internal(
                             app.improve_mode = None;
                             let stop_prompt = app_mod::commands::refactor_stop_prompt();
                             if app.is_processing {
-                                remote.cancel().await?;
+                                remote.cancel_with_reason("slash_refactor_stop").await?;
                                 app.set_status_notice("Interrupting for /refactor stop...");
                                 app.push_display_message(DisplayMessage::system(
                                     app_mod::commands::refactor_stop_notice(true),
@@ -2133,7 +2133,7 @@ async fn handle_remote_key_internal(
                                 focus.as_deref(),
                             );
                             if app.is_processing {
-                                remote.cancel().await?;
+                                remote.cancel_with_reason("slash_refactor_run").await?;
                                 app.set_status_notice(if plan_only {
                                     "Interrupting for /refactor plan..."
                                 } else {
@@ -2221,7 +2221,7 @@ async fn handle_remote_key_internal(
                         .queued_messages
                         .iter()
                         .any(|message| app_mod::commands::is_poke_message(message));
-                remote.cancel().await?;
+                remote.cancel_with_reason("keyboard_escape").await?;
                 if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);
                     app.set_status_notice("Interrupting... Auto-poke OFF");

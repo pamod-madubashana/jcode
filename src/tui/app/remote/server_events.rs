@@ -234,6 +234,16 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Interrupted => {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
+                app.remote_session_id,
+                app.current_message_id,
+                app.is_processing,
+                app.status,
+                app.streaming_text.len(),
+                app.pending_soft_interrupts.len(),
+                app.queued_messages.len()
+            ));
             let keep_pending_retry = app
                 .rate_limit_pending_message
                 .as_ref()
@@ -1112,9 +1122,19 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::SoftInterruptInjected {
             content,
             display_role,
-            point: _,
+            point,
             tools_skipped,
         } => {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_EVENT_RECEIVED kind=soft_interrupt_injected session={:?} point={} display_role={:?} tools_skipped={:?} content_bytes={} content_chars={} pending_soft_interrupts={}",
+                app.remote_session_id,
+                point,
+                display_role,
+                tools_skipped,
+                content.len(),
+                content.chars().count(),
+                app.pending_soft_interrupts.len()
+            ));
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.append_streaming_text(&chunk);
             }

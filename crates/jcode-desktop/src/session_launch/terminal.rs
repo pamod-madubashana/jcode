@@ -36,8 +36,13 @@ pub(super) fn launch_first_available_terminal(
 pub(super) fn terminal_candidates(title: &str, jcode_args: &[&str]) -> Vec<Command> {
     let mut candidates = Vec::new();
 
-    if let Ok(program) = std::env::var("JCODE_DESKTOP_TERMINAL") {
-        candidates.push(terminal_command(program, &[], jcode_args));
+    if let Ok(raw_terminal) = std::env::var("JCODE_DESKTOP_TERMINAL") {
+        match terminal_env_command(&raw_terminal, jcode_args) {
+            Ok(command) => candidates.push(command),
+            Err(error) => crate::desktop_log::warn(format_args!(
+                "jcode-desktop: ignoring invalid JCODE_DESKTOP_TERMINAL={raw_terminal:?}: {error:#}"
+            )),
+        }
     }
 
     candidates.push(terminal_command(
@@ -60,6 +65,87 @@ pub(super) fn terminal_candidates(title: &str, jcode_args: &[&str]) -> Vec<Comma
     ));
 
     candidates
+}
+
+fn terminal_env_command(raw_terminal: &str, jcode_args: &[&str]) -> Result<Command> {
+    let parts = parse_terminal_env_command(raw_terminal)?;
+    let Some((program, prefix_args)) = parts.split_first() else {
+        anyhow::bail!("terminal command is empty");
+    };
+    let mut command = Command::new(program);
+    command
+        .args(prefix_args)
+        .arg(jcode_bin())
+        .args(jcode_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
+fn parse_terminal_env_command(raw_terminal: &str) -> Result<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut token_started = false;
+
+    for ch in raw_terminal.chars() {
+        if escaped {
+            current.push(ch);
+            token_started = true;
+            escaped = false;
+            continue;
+        }
+
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            } else if ch == '\\' && quote_ch == '"' {
+                escaped = true;
+            } else {
+                current.push(ch);
+                token_started = true;
+            }
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escaped = true;
+                token_started = true;
+            }
+            '\'' | '"' => {
+                quote = Some(ch);
+                token_started = true;
+            }
+            ch if ch.is_whitespace() => {
+                if token_started {
+                    parts.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            ch => {
+                current.push(ch);
+                token_started = true;
+            }
+        }
+    }
+
+    if escaped {
+        anyhow::bail!("terminal command ends with an escape character");
+    }
+    if quote.is_some() {
+        anyhow::bail!("terminal command has an unterminated quote");
+    }
+    if token_started {
+        parts.push(current);
+    }
+    if parts.is_empty() {
+        anyhow::bail!("terminal command is empty");
+    }
+
+    Ok(parts)
 }
 
 fn terminal_command(
@@ -113,4 +199,49 @@ pub fn validate_resume_session_id(session_id: &str) -> Result<()> {
 pub fn launch_validated_resume_session(session_id: &str, title: &str) -> Result<()> {
     validate_resume_session_id(session_id).context("refusing to launch invalid session id")?;
     launch_resume_session(session_id, title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_terminal_env_command_with_quotes_and_escapes() -> Result<()> {
+        assert_eq!(
+            parse_terminal_env_command("kitty --title 'Jcode Desktop' --")?,
+            vec!["kitty", "--title", "Jcode Desktop", "--"]
+        );
+        assert_eq!(
+            parse_terminal_env_command(r#"footclient -T jcode\ desktop --"#)?,
+            vec!["footclient", "-T", "jcode desktop", "--"]
+        );
+        assert_eq!(
+            parse_terminal_env_command(r#"terminal --class "jcode desktop""#)?,
+            vec!["terminal", "--class", "jcode desktop"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_malformed_terminal_env_command() {
+        assert!(parse_terminal_env_command("   ").is_err());
+        assert!(parse_terminal_env_command("kitty '").is_err());
+        assert!(parse_terminal_env_command("kitty \\").is_err());
+    }
+
+    #[test]
+    fn terminal_env_command_appends_jcode_invocation_without_shell() -> Result<()> {
+        let command = terminal_env_command("kitty --title 'Jcode Desktop'", &["--resume", "abc"])?;
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program().to_string_lossy(), "kitty");
+        assert_eq!(
+            args,
+            vec!["--title", "Jcode Desktop", "jcode", "--resume", "abc"]
+        );
+        Ok(())
+    }
 }

@@ -91,11 +91,7 @@ pub(super) fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSe
             models: model_choices_from_server_value(value),
         }),
         "stdin_request" => Some(DesktopSessionEvent::StdinRequest {
-            request_id: value
-                .get("request_id")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
+            request_id: non_empty_server_str(value, "request_id")?.to_string(),
             prompt: value
                 .get("prompt")
                 .and_then(Value::as_str)
@@ -105,11 +101,7 @@ pub(super) fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSe
                 .get("is_password")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            tool_call_id: value
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
+            tool_call_id: non_empty_server_str(value, "tool_call_id")?.to_string(),
         }),
         "reloading" => Some(DesktopSessionEvent::Reloading {
             new_socket: value
@@ -127,6 +119,13 @@ pub(super) fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSe
         )),
         _ => None,
     }
+}
+
+fn non_empty_server_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 pub(super) fn model_catalog_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent> {

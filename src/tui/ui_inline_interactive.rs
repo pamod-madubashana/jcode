@@ -103,10 +103,10 @@ fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
 fn picker_row_marker(is_row_selected: bool, unavailable: bool, limited: bool) -> &'static str {
     if unavailable {
         "×"
-    } else if is_row_selected {
-        "▸"
     } else if limited {
         "⚠"
+    } else if is_row_selected {
+        "▸"
     } else {
         " "
     }
@@ -129,7 +129,9 @@ fn route_detail_display_text(detail: &str, unavailable: bool) -> Option<String> 
 
 fn route_detail_is_limited(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
-    lower.contains("no tools")
+    lower.contains("fallback:")
+        || lower.contains("fallback model")
+        || lower.contains("no tools")
         || lower.contains("requires an inference profile")
         || lower.contains("catalog still loading")
         || lower.contains("provider will initialize")
@@ -801,6 +803,32 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_route_details_are_warning_limited() {
+        assert!(route_detail_is_limited(
+            "https://mkp-api.fptcloud.com; fallback: static provider model list"
+        ));
+        assert_eq!(picker_row_marker(true, false, true), "⚠");
+        assert_eq!(picker_row_marker(false, false, true), "⚠");
+    }
+
+    #[test]
+    fn selected_fallback_model_shows_warning_notice() {
+        let mut picker = sample_picker();
+        picker.entries[0].options[0].detail =
+            "https://mkp-api.fptcloud.com; fallback: static provider model list".to_string();
+
+        let (notice, warning) = selected_route_notice_text(
+            &picker,
+            picker.entries[0].active_option(),
+        )
+        .expect("fallback model should show a warning notice");
+
+        assert!(warning);
+        assert!(notice.starts_with("⚠ "));
+        assert!(notice.contains("fallback: static provider model list"));
+    }
 
     fn sample_picker() -> crate::tui::InlineInteractiveState {
         crate::tui::InlineInteractiveState {

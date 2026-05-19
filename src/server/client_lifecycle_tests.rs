@@ -129,6 +129,8 @@ async fn cancel_without_local_task_still_signals_session_control() {
             event_counter: &event_counter,
             event_tx: &swarm_event_tx,
         },
+        Some(99),
+        None,
     )
     .await;
 

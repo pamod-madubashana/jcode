@@ -119,6 +119,45 @@ fn kv_cache_request_event(
     }
 }
 
+fn log_agent_provider_stream_lifecycle(
+    level: logging::LogLevel,
+    agent: &Agent,
+    phase: &str,
+    api_start: Instant,
+    fields: Vec<(&str, String)>,
+) {
+    let mut owned = vec![
+        ("phase".to_string(), phase.to_string()),
+        ("provider".to_string(), agent.provider.name().to_string()),
+        ("model".to_string(), agent.provider.model()),
+        ("session_id".to_string(), agent.session.id.clone()),
+        (
+            "provider_session_id".to_string(),
+            agent
+                .provider_session_id
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        ),
+        (
+            "connection_type".to_string(),
+            agent
+                .last_connection_type
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+        (
+            "elapsed_ms".to_string(),
+            api_start.elapsed().as_millis().to_string(),
+        ),
+    ];
+    owned.extend(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+    );
+    logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
+}
+
 /// Token usage from the last API request
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TokenUsage {

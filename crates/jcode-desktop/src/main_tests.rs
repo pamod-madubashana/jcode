@@ -3,6 +3,50 @@ use super::single_session::*;
 use super::*;
 
 #[test]
+fn desktop_frame_profile_is_opt_in_and_recognizes_trace_modes() {
+    assert!(!desktop_frame_profile_enabled(None));
+    assert!(!desktop_frame_profile_enabled(Some("")));
+    assert!(!desktop_frame_profile_enabled(Some("off")));
+    assert!(!desktop_frame_profile_enabled(Some("0")));
+    assert!(desktop_frame_profile_enabled(Some("1")));
+    assert!(desktop_frame_profile_enabled(Some("true")));
+    assert!(desktop_frame_profile_enabled(Some("all")));
+    assert!(desktop_frame_profile_enabled(Some("trace")));
+    assert!(!desktop_frame_profile_log_all(None));
+    assert!(!desktop_frame_profile_log_all(Some("1")));
+    assert!(desktop_frame_profile_log_all(Some("all")));
+    assert!(desktop_frame_profile_log_all(Some("TRACE")));
+}
+
+#[test]
+fn desktop_background_wake_only_tracks_active_frame_animation() {
+    let now = Instant::now();
+
+    assert_eq!(
+        desktop_background_wake(now, true, true),
+        Some(now + BACKGROUND_POLL_INTERVAL)
+    );
+    assert_eq!(desktop_background_wake(now, true, false), None);
+    assert_eq!(desktop_background_wake(now, false, true), None);
+}
+
+#[test]
+fn desktop_async_job_slots_are_bounded_and_released() -> Result<()> {
+    let counter = std::sync::atomic::AtomicUsize::new(0);
+    let first = try_acquire_desktop_async_job_slot(&counter, 2)?;
+    let second = try_acquire_desktop_async_job_slot(&counter, 2)?;
+
+    assert!(try_acquire_desktop_async_job_slot(&counter, 2).is_err());
+    drop(first);
+    let third = try_acquire_desktop_async_job_slot(&counter, 2)?;
+    assert!(try_acquire_desktop_async_job_slot(&counter, 2).is_err());
+    drop(second);
+    drop(third);
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[test]
 fn quarter_size_preset_follows_quarter_screen_width_steps() {
     let monitor_width = Some(2000);
 
@@ -40,6 +84,35 @@ fn visible_column_count_is_clamped_and_safe_without_monitor() {
     assert_eq!(inferred_visible_column_count(3000, Some(2000), 0.25), 4);
     assert_eq!(inferred_visible_column_count(1000, Some(0), 0.25), 1);
     assert_eq!(inferred_visible_column_count(1000, None, 0.25), 1);
+}
+
+#[test]
+fn desktop_surface_size_renderable_requires_non_zero_dimensions() {
+    assert!(desktop_surface_size_is_renderable(PhysicalSize::new(1, 1)));
+    assert!(!desktop_surface_size_is_renderable(PhysicalSize::new(0, 1)));
+    assert!(!desktop_surface_size_is_renderable(PhysicalSize::new(1, 0)));
+    assert!(!desktop_surface_size_is_renderable(PhysicalSize::new(0, 0)));
+}
+
+#[test]
+fn surface_timeout_backoff_doubles_until_cap_and_resets() {
+    let mut backoff = SurfaceTimeoutBackoff::default();
+    let delays = (0..8)
+        .map(|_| backoff.record_timeout().0)
+        .collect::<Vec<_>>();
+
+    assert_eq!(delays[0], SURFACE_TIMEOUT_BACKOFF_MIN);
+    assert_eq!(delays[1], SURFACE_TIMEOUT_BACKOFF_MIN * 2);
+    assert_eq!(delays[2], SURFACE_TIMEOUT_BACKOFF_MIN * 4);
+    assert!(delays.windows(2).all(|pair| pair[1] >= pair[0]));
+    assert!(
+        delays
+            .iter()
+            .all(|delay| *delay <= SURFACE_TIMEOUT_BACKOFF_MAX)
+    );
+
+    backoff.reset();
+    assert_eq!(backoff.record_timeout().0, SURFACE_TIMEOUT_BACKOFF_MIN);
 }
 
 #[test]
@@ -177,8 +250,10 @@ fn single_session_typography_targets_jetbrains_mono_light_nerd() {
         SINGLE_SESSION_DEFAULT_FONT_SIZE
     );
     assert_eq!(SINGLE_SESSION_CODE_FONT_SIZE, SINGLE_SESSION_BODY_FONT_SIZE);
-    assert!(SINGLE_SESSION_BODY_LINE_HEIGHT > SINGLE_SESSION_CODE_LINE_HEIGHT);
-    assert!(SINGLE_SESSION_CODE_LINE_HEIGHT > SINGLE_SESSION_META_LINE_HEIGHT);
+    const {
+        assert!(SINGLE_SESSION_BODY_LINE_HEIGHT > SINGLE_SESSION_CODE_LINE_HEIGHT);
+        assert!(SINGLE_SESSION_CODE_LINE_HEIGHT > SINGLE_SESSION_META_LINE_HEIGHT);
+    }
 }
 
 #[test]
@@ -284,10 +359,10 @@ fn fresh_single_session_without_crashes_keeps_refresh_as_redraw() {
 }
 
 #[test]
-fn single_session_active_work_uses_native_spinner_geometry() {
+fn single_session_active_work_uses_streaming_activity_cue_geometry() {
     let mut app = SingleSessionApp::new(None);
     let idle = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
-    assert!(!vertices_have_color(&idle, NATIVE_SPINNER_HEAD_COLOR));
+    assert!(!vertices_have_rgb(&idle, NATIVE_SPINNER_HEAD_COLOR));
 
     app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
         "streaming".to_string(),
@@ -295,11 +370,11 @@ fn single_session_active_work_uses_native_spinner_geometry() {
     let tick_zero = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
     let tick_one = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 1);
 
-    assert!(vertices_have_color(&tick_zero, NATIVE_SPINNER_HEAD_COLOR));
-    assert!(vertices_have_color(&tick_one, NATIVE_SPINNER_HEAD_COLOR));
+    assert!(vertices_have_rgb(&tick_zero, NATIVE_SPINNER_HEAD_COLOR));
+    assert!(vertices_have_rgb(&tick_one, NATIVE_SPINNER_HEAD_COLOR));
     assert_ne!(
-        positions_for_color(&tick_zero, NATIVE_SPINNER_HEAD_COLOR),
-        positions_for_color(&tick_one, NATIVE_SPINNER_HEAD_COLOR)
+        colors_for_rgb(&tick_zero, NATIVE_SPINNER_HEAD_COLOR),
+        colors_for_rgb(&tick_one, NATIVE_SPINNER_HEAD_COLOR)
     );
 }
 
@@ -695,7 +770,7 @@ fn single_session_assistant_markdown_is_prepared_for_desktop_rendering() {
     assert!(body.contains("Plan"));
     assert!(body.contains("• first"));
     assert!(body.contains("• second"));
-    assert!(body.contains("Use `cargo test`."));
+    assert!(body.contains("Use cargo test."));
     assert!(body.contains("  rust"));
     assert!(body.contains("  fn main() {}"));
     assert!(!body.contains("```"));
@@ -727,9 +802,9 @@ fn single_session_markdown_renderer_handles_rich_commonmark_shapes() {
     );
     assert!(body.contains("1. first"));
     assert!(body.contains("2. second"));
-    assert!(body.contains("docs ↗ https://example.com and **bold** plus *em*."));
+    assert!(body.contains("docs ↗ https://example.com and bold plus em."));
     assert_eq!(
-        style_for_text(&lines, "docs ↗ https://example.com and **bold** plus *em*."),
+        style_for_text(&lines, "docs ↗ https://example.com and bold plus em."),
         Some(SingleSessionLineStyle::AssistantLink)
     );
     assert!(body.contains("name  │ value"));
@@ -756,7 +831,7 @@ fn single_session_markdown_renderer_preserves_media_html_and_table_alignment() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(body.contains("Text **strong** and *em* and ~~old~~ with `<kbd>`Esc`</kbd>`."));
+    assert!(body.contains("Text strong and em and old with <kbd>Esc</kbd>."));
     assert!(body.contains("🖼 diagram ↗ https://example.com/diagram.png"));
     assert_eq!(
         style_for_text(&lines, "🖼 diagram ↗ https://example.com/diagram.png"),
@@ -843,7 +918,7 @@ fn single_session_markdown_renderer_handles_extended_gfm_structures() {
         style_for_text(&lines, "WARNING │ pay attention"),
         Some(SingleSessionLineStyle::AssistantQuote)
     );
-    assert!(body.contains("Inline $x+y$."));
+    assert!(body.contains("Inline x+y."));
     assert!(body.contains("CLI --flag stays literal."));
     assert!(!body.contains("CLI –flag"));
     assert!(body.contains("  $$"));
@@ -954,8 +1029,9 @@ fn single_session_markdown_vertices_draw_heading_rule_and_inline_math_affordance
         .expect("heading line should be present");
     let inline_line = body_lines
         .iter()
-        .position(|line| line.text == "Use `cargo` and $x+y$.")
+        .position(|line| line.text == "Use cargo and x+y.")
         .expect("inline markdown line should be present");
+    let inline_styled_line = &body_lines[inline_line];
     let rule_line = body_lines
         .iter()
         .position(|line| line.text == "────────────")
@@ -986,7 +1062,7 @@ fn single_session_markdown_vertices_draw_heading_rule_and_inline_math_affordance
         "heading card",
     );
 
-    let code_run = single_session_inline_code_runs("Use `cargo` and $x+y$.")
+    let code_run = single_session_inline_code_runs_for_line(inline_styled_line)
         .into_iter()
         .next()
         .expect("code run should be detected");
@@ -1003,7 +1079,7 @@ fn single_session_markdown_vertices_draw_heading_rule_and_inline_math_affordance
         "inline code pill",
     );
 
-    let math_run = single_session_inline_math_runs("Use `cargo` and $x+y$.")
+    let math_run = single_session_inline_math_runs_for_line(inline_styled_line)
         .into_iter()
         .next()
         .expect("math run should be detected");
@@ -1299,7 +1375,7 @@ fn single_session_cut_and_retrieve_queued_draft_match_tui_shortcuts() {
 }
 
 #[test]
-fn single_session_header_exposes_desktop_binary_and_version() {
+fn single_session_header_exposes_desktop_app_directory() {
     let mut app = SingleSessionApp::new(Some(test_session_card(
         "session_header",
         "session header",
@@ -1309,12 +1385,23 @@ fn single_session_header_exposes_desktop_binary_and_version() {
         session_id: "session_header".to_string(),
     });
     let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
-    let build_version = option_env!("JCODE_DESKTOP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    let app_directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .map(|directory| directory.display().to_string())
+        })
+        .unwrap_or_else(|| "unknown app directory".to_string());
 
-    assert!(key.version.contains(build_version));
     assert!(
-        key.version.contains("jcode-desktop") || key.version.contains("jcode_desktop"),
-        "version label should include the running desktop binary path, got {:?}",
+        key.version.contains(&app_directory),
+        "version label should include the desktop app directory, got {:?}, expected {:?}",
+        key.version,
+        app_directory
+    );
+    assert!(
+        !key.version.contains(env!("CARGO_PKG_VERSION")),
+        "version label should not include the package version, got {:?}",
         key.version
     );
 }
@@ -1328,7 +1415,8 @@ fn fresh_single_session_startup_puts_greeting_in_welcome_hero() {
     assert_is_handwritten_welcome_phrase(&key.welcome_hero);
     assert_visual_text_contains(&key, &key.welcome_hero);
     assert!(key.body.is_empty());
-    assert!(key.welcome_hint.is_empty());
+    assert_eq!(key.welcome_hint.len(), 1);
+    assert!(key.welcome_hint[0].text.contains("Type a message to start"));
 }
 
 #[test]
@@ -1341,7 +1429,7 @@ fn single_session_text_buffers_include_header_version_area() {
     let mut font_system = FontSystem::new();
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
 
-    assert_eq!(buffers.len(), 6);
+    assert_eq!(buffers.len(), 7);
     assert_eq!(single_session_text_areas(&buffers, size).len(), 4);
 }
 
@@ -1353,9 +1441,19 @@ fn fresh_welcome_greeting_uses_handwritten_hero_chrome() {
 
     assert_is_handwritten_welcome_phrase(&key.welcome_hero);
     assert_visual_text_contains(&key, &key.welcome_hero);
-    assert!(key.welcome_hint.is_empty());
+    assert_eq!(key.welcome_hint.len(), 1);
     assert!(vertices_have_color(&vertices, WELCOME_AURORA_BLUE));
-    assert_runtime_welcome_hero_available(&app, PhysicalSize::new(1000, 720));
+}
+
+#[test]
+fn fresh_welcome_startup_hint_hides_after_typing() {
+    let mut app = SingleSessionApp::new(None);
+    let fresh_key = single_session_text_key(&app, PhysicalSize::new(900, 700));
+    assert_eq!(fresh_key.welcome_hint.len(), 1);
+
+    app.handle_key(KeyInput::Character("hello".to_string()));
+    let typed_key = single_session_text_key(&app, PhysicalSize::new(900, 700));
+    assert!(typed_key.welcome_hint.is_empty());
 }
 
 #[test]
@@ -1549,6 +1647,7 @@ fn assistant_symbol_lines_use_main_font_to_avoid_missing_glyph_boxes() {
     let symbol_lines = [SingleSessionStyledLine {
         text: symbol_line.to_string(),
         style: SingleSessionLineStyle::AssistantLink,
+        inline_spans: Vec::new(),
     }];
     let symbol_segments = single_session_styled_text_segments(&symbol_lines);
     assert!(
@@ -1566,6 +1665,7 @@ fn assistant_symbol_lines_use_main_font_to_avoid_missing_glyph_boxes() {
     let plain_lines = [SingleSessionStyledLine {
         text: plain_line.to_string(),
         style: SingleSessionLineStyle::Assistant,
+        inline_spans: Vec::new(),
     }];
     let plain_segments = single_session_styled_text_segments(&plain_lines);
     assert!(
@@ -1617,10 +1717,29 @@ fn glyphon_body_buffer_uses_line_style_colors() {
 
 #[test]
 fn assistant_inline_code_uses_code_text_attrs_inside_prose() {
-    let lines = [SingleSessionStyledLine {
-        text: "Use `cargo test` before `cargo clippy`.".to_string(),
-        style: SingleSessionLineStyle::Assistant,
-    }];
+    let mut app = SingleSessionApp::new(None);
+    app.messages.push(SingleSessionMessage::assistant(
+        "Use `cargo test` before `cargo clippy`.",
+    ));
+    let line = app
+        .body_styled_lines()
+        .into_iter()
+        .find(|line| line.text.starts_with("Use "))
+        .expect("assistant inline code line should render");
+
+    assert_eq!(line.text, "Use cargo test before cargo clippy.");
+    assert_eq!(
+        line.inline_spans
+            .iter()
+            .map(|span| (span.start, span.end, span.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            (4, 14, SingleSessionInlineSpanKind::Code),
+            (22, 34, SingleSessionInlineSpanKind::Code),
+        ]
+    );
+
+    let lines = [line];
 
     let segments = single_session_styled_text_segments(&lines);
 
@@ -1632,7 +1751,8 @@ fn assistant_inline_code_uses_code_text_attrs_inside_prose() {
                 .color(single_session_line_color(SingleSessionLineStyle::Assistant))
         ))
     );
-    for code_segment in ["`", "cargo test", "cargo clippy"] {
+    assert!(!segments.iter().any(|(text, _)| text.contains('`')));
+    for code_segment in ["cargo test", "cargo clippy"] {
         assert!(
             segments.contains(&(
                 code_segment,
@@ -1654,6 +1774,30 @@ fn assistant_inline_code_runs_and_vertices_draw_code_pills() {
         vec![(4, 12), (24, 14)]
     );
 
+    let parsed_line = SingleSessionStyledLine::with_inline_spans(
+        "Use cargo test before cargo clippy.",
+        SingleSessionLineStyle::Assistant,
+        vec![
+            SingleSessionInlineSpan {
+                start: 4,
+                end: 14,
+                kind: SingleSessionInlineSpanKind::Code,
+            },
+            SingleSessionInlineSpan {
+                start: 22,
+                end: 34,
+                kind: SingleSessionInlineSpanKind::Code,
+            },
+        ],
+    );
+    assert_eq!(
+        single_session_inline_code_runs_for_line(&parsed_line)
+            .into_iter()
+            .map(|run| (run.start_column, run.column_count))
+            .collect::<Vec<_>>(),
+        vec![(4, 10), (22, 12)]
+    );
+
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::assistant(
         "Use `cargo test` before shipping.\n\n```rust\nfn main() {}\n```",
@@ -1665,20 +1809,215 @@ fn assistant_inline_code_runs_and_vertices_draw_code_pills() {
 }
 
 #[test]
+fn assistant_whitespace_only_inline_code_preserves_space_span() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::assistant("before ` ` after\n\n` `"));
+
+    let body_lines = app.body_styled_lines();
+    let inline_line = body_lines
+        .iter()
+        .find(|line| line.text == "before   after")
+        .expect("inline whitespace code should remain in surrounding prose");
+    assert_eq!(
+        inline_line.inline_spans,
+        vec![SingleSessionInlineSpan {
+            start: 7,
+            end: 8,
+            kind: SingleSessionInlineSpanKind::Code,
+        }]
+    );
+
+    let standalone_line = body_lines
+        .iter()
+        .find(|line| line.text == " ")
+        .expect("standalone whitespace code should render as a one-space line");
+    assert_eq!(
+        standalone_line.inline_spans,
+        vec![SingleSessionInlineSpan {
+            start: 0,
+            end: 1,
+            kind: SingleSessionInlineSpanKind::Code,
+        }]
+    );
+}
+
+#[test]
+fn assistant_whitespace_only_inline_code_draws_exact_pill_at_space_column() {
+    let size = PhysicalSize::new(1000, 720);
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::assistant("before ` ` after"));
+
+    let body_lines = single_session_rendered_body_lines_for_tick(&app, size, 0);
+    let inline_line_index = body_lines
+        .iter()
+        .position(|line| line.text == "before   after")
+        .expect("inline whitespace code line should render");
+    let inline_line = &body_lines[inline_line_index];
+    assert_eq!(
+        inline_line.inline_spans,
+        vec![SingleSessionInlineSpan {
+            start: 7,
+            end: 8,
+            kind: SingleSessionInlineSpanKind::Code,
+        }]
+    );
+    assert_eq!(
+        single_session_inline_code_runs_for_line(inline_line)
+            .into_iter()
+            .map(|run| (run.start_column, run.column_count))
+            .collect::<Vec<_>>(),
+        vec![(7, 1)]
+    );
+
+    let vertices = build_single_session_vertices(&app, size, 0.0, 0);
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.body_size * typography.body_line_height;
+    let char_width = single_session_body_char_width();
+    let card_height = (typography.body_size * 1.10)
+        .min(line_height - 5.0)
+        .max(typography.body_size * 0.85);
+    let horizontal_pad = (3.5 * app.text_scale()).clamp(3.0, 6.0);
+
+    assert_pixel_bounds_close(
+        pixel_bounds_for_color(&vertices, INLINE_CODE_BACKGROUND_COLOR, size)
+            .expect("whitespace inline code pill vertices should be present"),
+        Rect {
+            x: PANEL_TITLE_LEFT_PADDING + 7.0 * char_width - horizontal_pad,
+            y: PANEL_BODY_TOP_PADDING
+                + inline_line_index as f32 * line_height
+                + (line_height - card_height) * 0.5,
+            width: char_width + horizontal_pad * 2.0,
+            height: card_height,
+        },
+        "whitespace inline code pill",
+    );
+}
+
+#[test]
+fn assistant_inline_code_pill_matches_glyphon_layout_after_narrow_wrap() {
+    let size = PhysicalSize::new(718, 720);
+    let mut app = SingleSessionApp::new(None);
+    app.messages.push(SingleSessionMessage::assistant(
+        "Sure, you can use backticks to format inline code like a variable name:\n\n`userName`",
+    ));
+
+    let body_lines = single_session_rendered_body_lines_for_tick(&app, size, 0);
+    assert!(
+        body_lines
+            .iter()
+            .any(|line| line.text == "format inline code like a variable"),
+        "narrow fixture should exercise a line that glyphon used to re-wrap"
+    );
+    let code_line_index = body_lines
+        .iter()
+        .position(|line| line.text == "userName")
+        .expect("standalone inline code line should render");
+    let viewport = single_session_body_viewport_from_lines(&app, size, 0.0, &body_lines);
+    assert!(
+        code_line_index >= viewport.start_line,
+        "code line should be visible in the bottom-aligned narrow viewport"
+    );
+    let viewport_code_line_index = code_line_index - viewport.start_line;
+    let viewport_code_line = viewport
+        .lines
+        .get(viewport_code_line_index)
+        .expect("visible viewport should contain code line");
+    assert_eq!(viewport_code_line.text, "userName");
+    let code_span = viewport_code_line
+        .inline_spans
+        .iter()
+        .find(|span| span.kind == SingleSessionInlineSpanKind::Code)
+        .copied()
+        .expect("userName should retain a code span");
+
+    let mut font_system = FontSystem::new();
+    let body_buffer = single_session_body_text_buffer_from_lines(
+        &mut font_system,
+        &viewport.lines,
+        size,
+        app.text_scale(),
+    );
+    let layout_runs = body_buffer.layout_runs().collect::<Vec<_>>();
+    assert_eq!(
+        layout_runs.len(),
+        viewport.lines.len(),
+        "body buffer must not glyphon-wrap rows that were already explicitly wrapped"
+    );
+    let glyphon_code_run = &layout_runs[viewport_code_line_index];
+    assert_eq!(glyphon_code_run.line_i, viewport_code_line_index);
+    assert_eq!(glyphon_code_run.text, "userName");
+    let (glyphon_code_x, glyphon_code_width) = glyphon_code_run
+        .highlight(
+            glyphon::Cursor::new(viewport_code_line_index, code_span.start),
+            glyphon::Cursor::new(viewport_code_line_index, code_span.end),
+        )
+        .expect("glyphon should expose the code span bounds on the same visual row");
+    assert!(glyphon_code_x.abs() <= 0.75);
+    assert!(glyphon_code_width > 0.0);
+
+    let vertices = build_single_session_vertices(&app, size, 0.0, 0);
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.body_size * typography.body_line_height;
+    let char_width = single_session_body_char_width();
+    let card_height = (typography.body_size * 1.10)
+        .min(line_height - 5.0)
+        .max(typography.body_size * 0.85);
+    let horizontal_pad = (3.5 * app.text_scale()).clamp(3.0, 6.0);
+    let code_run = single_session_inline_code_runs_for_line(viewport_code_line)
+        .into_iter()
+        .next()
+        .expect("code card run should be detected");
+
+    assert_pixel_bounds_close(
+        pixel_bounds_for_color(&vertices, INLINE_CODE_BACKGROUND_COLOR, size)
+            .expect("inline code pill vertices should be present"),
+        Rect {
+            x: PANEL_TITLE_LEFT_PADDING + code_run.start_column as f32 * char_width
+                - horizontal_pad,
+            y: PANEL_BODY_TOP_PADDING
+                + viewport.top_offset_pixels
+                + glyphon_code_run.line_top
+                + (line_height - card_height) * 0.5,
+            width: code_run.column_count as f32 * char_width + horizontal_pad * 2.0,
+            height: card_height,
+        },
+        "narrow inline code pill",
+    );
+}
+
+#[test]
 fn assistant_markdown_inline_segments_style_semantics_and_task_markers() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages.push(SingleSessionMessage::assistant(
+        "Use **bold** and *em* and ~~old~~ with $x+y$.",
+    ));
+    let markdown_line = app
+        .body_styled_lines()
+        .into_iter()
+        .find(|line| line.text.starts_with("Use "))
+        .expect("assistant markdown line should render");
+
+    assert_eq!(markdown_line.text, "Use bold and em and old with x+y.");
+    assert_eq!(
+        markdown_line
+            .inline_spans
+            .iter()
+            .map(|span| (span.start, span.end, span.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            (4, 8, SingleSessionInlineSpanKind::Strong),
+            (13, 15, SingleSessionInlineSpanKind::Emphasis),
+            (20, 23, SingleSessionInlineSpanKind::Strike),
+            (29, 32, SingleSessionInlineSpanKind::Math),
+        ]
+    );
+
     let lines = [
-        SingleSessionStyledLine {
-            text: "Use **bold** and *em* and ~~old~~ with $x+y$.".to_string(),
-            style: SingleSessionLineStyle::Assistant,
-        },
-        SingleSessionStyledLine {
-            text: "✓ shipped".to_string(),
-            style: SingleSessionLineStyle::Assistant,
-        },
-        SingleSessionStyledLine {
-            text: "☐ polish".to_string(),
-            style: SingleSessionLineStyle::Assistant,
-        },
+        markdown_line,
+        SingleSessionStyledLine::new("✓ shipped", SingleSessionLineStyle::Assistant),
+        SingleSessionStyledLine::new("☐ polish", SingleSessionLineStyle::Assistant),
     ];
 
     let segments = single_session_styled_text_segments(&lines);
@@ -1763,14 +2102,17 @@ fn single_session_tool_text_segments_use_stateful_colors() {
         SingleSessionStyledLine {
             text: "  ✓ bash · done · tests passed".to_string(),
             style: SingleSessionLineStyle::Tool,
+            inline_spans: Vec::new(),
         },
         SingleSessionStyledLine {
             text: "  │intent: Run tests                                            │".to_string(),
             style: SingleSessionLineStyle::Tool,
+            inline_spans: Vec::new(),
         },
         SingleSessionStyledLine {
             text: "  plain tool output".to_string(),
             style: SingleSessionLineStyle::Tool,
+            inline_spans: Vec::new(),
         },
     ];
 
@@ -1879,6 +2221,12 @@ fn vertices_have_color(vertices: &[Vertex], color: [f32; 4]) -> bool {
     vertices.iter().any(|vertex| vertex.color == color)
 }
 
+fn vertices_have_rgb(vertices: &[Vertex], color: [f32; 4]) -> bool {
+    vertices
+        .iter()
+        .any(|vertex| vertex.color[..3] == color[..3])
+}
+
 fn assert_runtime_welcome_hero_available(app: &SingleSessionApp, size: PhysicalSize<u32>) {
     let rendered_body_lines = single_session_rendered_body_lines_for_tick(app, size, 0);
     let spec =
@@ -1911,6 +2259,14 @@ fn positions_for_color(vertices: &[Vertex], color: [f32; 4]) -> Vec<[u32; 2]> {
         .iter()
         .filter(|vertex| vertex.color == color)
         .map(|vertex| vertex.position.map(f32::to_bits))
+        .collect()
+}
+
+fn colors_for_rgb(vertices: &[Vertex], color: [f32; 4]) -> Vec<[u32; 4]> {
+    vertices
+        .iter()
+        .filter(|vertex| vertex.color[..3] == color[..3])
+        .map(|vertex| vertex.color.map(f32::to_bits))
         .collect()
 }
 
@@ -2056,6 +2412,36 @@ fn single_session_tool_events_expand_context_and_collapse_previous_call() {
     assert!(body.contains("  ✓ bash · done · tests passed"));
     assert!(!body.contains("Run desktop tests"));
     assert!(body.contains("  ○ read · preparing"));
+}
+
+#[test]
+fn single_session_running_tool_input_is_visible_and_invalidates_render_cache() {
+    let mut app = SingleSessionApp::new(None);
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::ToolStarted {
+        name: "bash".to_string(),
+    });
+    app.apply_session_event(session_launch::DesktopSessionEvent::ToolExecuting {
+        name: "bash".to_string(),
+    });
+    let before_input_cache_key = app.rendered_body_cache_key((900, 700));
+    let before_static_cache_key = app.rendered_body_static_cache_key((900, 700));
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::ToolInput {
+        delta: r#"{"command":"sleep 10","intent":"wait while running"}"#.to_string(),
+    });
+
+    let body = app.body_lines().join("\n");
+    assert!(body.contains("  ● bash · running · $ sleep 10"), "{body}");
+    assert!(body.contains("waiting for tool output…"), "{body}");
+    assert_ne!(
+        app.rendered_body_cache_key((900, 700)),
+        before_input_cache_key
+    );
+    assert_ne!(
+        app.rendered_body_static_cache_key((900, 700)),
+        before_static_cache_key
+    );
 }
 
 #[test]
@@ -3669,6 +4055,35 @@ fn fractional_scroll_offsets_body_text_area_without_moving_chrome() {
 }
 
 #[test]
+fn fractional_body_bottom_bounds_round_outward() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello desktop".to_string()));
+    assert!(matches!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::StartFreshSession { .. }
+    ));
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "assistant response".to_string(),
+    ));
+    let size = PhysicalSize::new(900, 640);
+    let mut font_system = FontSystem::new();
+    let buffers = single_session_text_buffers(&app, size, &mut font_system);
+    let areas = single_session_text_areas_for_app(&app, &buffers, size);
+    let body_area = areas
+        .iter()
+        .find(|area| {
+            area.bounds.top == PANEL_BODY_TOP_PADDING as i32
+                && area.default_color == text_color(ASSISTANT_TEXT_COLOR)
+        })
+        .expect("body text area");
+    let rendered_lines = single_session_rendered_body_lines_for_tick(&app, size, 0);
+    let expected_bottom =
+        single_session_body_bottom_for_total_lines(&app, size, rendered_lines.len()).ceil() as i32;
+
+    assert_eq!(body_area.bounds.bottom, expected_bottom);
+}
+
+#[test]
 fn welcome_timeline_body_reserves_composer_lane_clearance() {
     let size = PhysicalSize::new(900, 640);
     let mut app = SingleSessionApp::new(None);
@@ -3768,7 +4183,7 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
         areas.first().expect("draft text area").top,
         fresh_welcome_draft_top(size)
     );
-    assert_eq!(areas.len(), 4, "fresh welcome hides normal status chrome");
+    assert_eq!(areas.len(), 5, "fresh welcome shows startup hint chrome");
     assert!(
         areas.first().expect("draft text area").top > handwritten_welcome_bounds(size).1[1],
         "fresh input line should stay visually below the handwritten hero"
@@ -3935,7 +4350,7 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     assert_visual_text_contains(&key, &key.welcome_hero);
     assert!(vertices_have_color(&vertices, WELCOME_AURORA_BLUE));
     assert_runtime_welcome_hero_available(&app, size);
-    assert!(vertices_have_color(&vertices, NATIVE_SPINNER_HEAD_COLOR));
+    assert!(vertices_have_rgb(&vertices, NATIVE_SPINNER_HEAD_COLOR));
     assert!(
         key.body
             .iter()
@@ -4083,7 +4498,7 @@ fn fresh_single_session_keeps_welcome_model_and_hero_available() {
     assert_eq!(first.welcome_hero, later.welcome_hero);
     assert_is_handwritten_welcome_phrase(&first.welcome_hero);
     assert!(first.body.is_empty());
-    assert!(first.welcome_hint.is_empty());
+    assert_eq!(first.welcome_hint.len(), 1);
 }
 
 #[test]

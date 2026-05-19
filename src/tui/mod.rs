@@ -5,6 +5,7 @@ pub(crate) mod color_support;
 mod core;
 mod generated_image;
 pub mod image;
+mod image_metadata;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;

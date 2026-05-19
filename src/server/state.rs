@@ -392,14 +392,30 @@ pub(super) fn enqueue_soft_interrupt(
     urgent: bool,
     source: SoftInterruptSource,
 ) -> bool {
+    let content_bytes = content.len();
+    let content_chars = content.chars().count();
     if let Ok(mut pending) = queue.lock() {
+        let pending_before = pending.len();
         pending.push(SoftInterruptMessage {
             content,
             urgent,
             source,
         });
+        crate::logging::info(&format!(
+            "SOFT_INTERRUPT_QUEUE_PUSH source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
+            source,
+            urgent,
+            content_bytes,
+            content_chars,
+            pending_before,
+            pending.len()
+        ));
         true
     } else {
+        crate::logging::warn(&format!(
+            "SOFT_INTERRUPT_QUEUE_PUSH_FAILED source={:?} urgent={} content_bytes={} content_chars={} reason=queue_lock_poisoned",
+            source, urgent, content_bytes, content_chars
+        ));
         false
     }
 }
@@ -457,23 +473,49 @@ impl SessionControlHandle {
 
     pub fn clear_soft_interrupts(&self) {
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
+            let cleared = queue.len();
             queue.clear();
+            crate::logging::info(&format!(
+                "SOFT_INTERRUPT_QUEUE_CLEAR session={} cleared={}",
+                self.session_id, cleared
+            ));
+        } else {
+            crate::logging::warn(&format!(
+                "SOFT_INTERRUPT_QUEUE_CLEAR_FAILED session={} reason=queue_lock_poisoned",
+                self.session_id
+            ));
         }
     }
 
     pub fn request_cancel(&self) {
+        crate::logging::info(&format!(
+            "SESSION_CANCEL_SIGNAL_FIRE session={}",
+            self.session_id
+        ));
         self.stop_current_turn_signal.fire();
     }
 
     pub fn reset_cancel(&self) {
+        crate::logging::info(&format!(
+            "SESSION_CANCEL_SIGNAL_RESET session={}",
+            self.session_id
+        ));
         self.stop_current_turn_signal.reset();
     }
 
     pub fn request_background_current_tool(&self) -> bool {
         if let Some(signal) = &self.background_tool_signal {
             signal.fire();
+            crate::logging::info(&format!(
+                "BACKGROUND_TOOL_SIGNAL_FIRE session={} result=sent",
+                self.session_id
+            ));
             true
         } else {
+            crate::logging::warn(&format!(
+                "BACKGROUND_TOOL_SIGNAL_FIRE session={} result=no_signal_handle",
+                self.session_id
+            ));
             false
         }
     }

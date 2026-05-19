@@ -82,6 +82,7 @@ enum PinnedContentEntry {
     Image {
         label: String,
         media_type: String,
+        byte_count: Option<u64>,
         source: crate::session::RenderedImageSource,
         hash: u64,
         width: u32,
@@ -710,6 +711,7 @@ fn collect_pinned_content(
                     .clone()
                     .unwrap_or_else(|| image.media_type.clone()),
                 media_type: image.media_type.clone(),
+                byte_count: crate::tui::image_metadata::estimate_base64_decoded_len(&image.data),
                 source: image.source.clone(),
                 hash,
                 width,
@@ -824,6 +826,13 @@ pub(super) fn draw_pinned_content_cached(
         .iter()
         .filter(|e| matches!(e, PinnedContentEntry::Image { .. }))
         .count();
+    let total_image_bytes: u64 = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            PinnedContentEntry::Image { byte_count, .. } => *byte_count,
+            _ => None,
+        })
+        .sum();
     let total_additions: usize = entries
         .iter()
         .map(|e| match e {
@@ -867,7 +876,15 @@ pub(super) fn draw_pinned_content_cached(
             title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
         }
         title_parts.push(Span::styled(
-            format!("📷{}", total_images),
+            if total_image_bytes > 0 {
+                format!(
+                    "📷{} {}",
+                    total_images,
+                    crate::tui::image_metadata::format_byte_count(total_image_bytes)
+                )
+            } else {
+                format!("📷{}", total_images)
+            },
             Style::default().fg(dim_color()),
         ));
     }
@@ -966,6 +983,7 @@ pub(super) fn draw_pinned_content_cached(
                 PinnedContentEntry::Image {
                     label,
                     media_type,
+                    byte_count,
                     source,
                     hash,
                     width: img_w,
@@ -988,19 +1006,26 @@ pub(super) fn draw_pinned_content_cached(
 
                     let short_label = compact_image_label(label);
                     let source_badge = image_source_badge(source);
+                    let dimensions = crate::tui::image_metadata::format_dimensions(*img_w, *img_h);
+                    let mut metadata_parts =
+                        vec![crate::tui::image_metadata::compact_image_format(media_type)];
+                    if let Some(byte_count) = byte_count {
+                        metadata_parts
+                            .push(crate::tui::image_metadata::format_byte_count(*byte_count));
+                    }
+                    if let Some(ratio) = crate::tui::image_metadata::aspect_ratio(*img_w, *img_h) {
+                        metadata_parts.push(format!("{ratio} ratio"));
+                    }
 
                     text_lines.push(Line::from(vec![
-                        Span::styled("── 📷 ", Style::default().fg(dim_color())),
+                        Span::styled("── 🖼 ", Style::default().fg(dim_color())),
                         Span::styled(
                             short_label,
                             Style::default()
                                 .fg(rgb(180, 200, 255))
                                 .add_modifier(ratatui::style::Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!(" {}×{}", img_w, img_h),
-                            Style::default().fg(dim_color()),
-                        ),
+                        Span::styled(format!(" {dimensions}"), Style::default().fg(dim_color())),
                         Span::styled(
                             format!(" [{}]", source_badge),
                             Style::default().fg(match group {
@@ -1010,11 +1035,16 @@ pub(super) fn draw_pinned_content_cached(
                             }),
                         ),
                     ]));
-                    text_lines.push(Line::from(vec![
-                        Span::styled("   ", Style::default().fg(dim_color())),
-                        Span::styled(media_type.clone(), Style::default().fg(dim_color())),
-                        Span::styled(" • exact model artifact", Style::default().fg(dim_color())),
-                    ]));
+                    let mut metadata_spans =
+                        vec![Span::styled("   ", Style::default().fg(dim_color()))];
+                    for (index, part) in metadata_parts.into_iter().enumerate() {
+                        if index > 0 {
+                            metadata_spans
+                                .push(Span::styled(" • ", Style::default().fg(dim_color())));
+                        }
+                        metadata_spans.push(Span::styled(part, Style::default().fg(dim_color())));
+                    }
+                    text_lines.push(Line::from(metadata_spans));
 
                     if has_protocol {
                         let image_layout = pinned_content_image_layout_with_font(

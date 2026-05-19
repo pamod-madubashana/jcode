@@ -166,6 +166,31 @@ impl OpenAITransport {
     }
 }
 
+fn log_openai_stream_lifecycle(
+    level: crate::logging::LogLevel,
+    phase: &str,
+    fields: Vec<(&str, String)>,
+) {
+    let mut owned = vec![
+        ("phase".to_string(), phase.to_string()),
+        ("provider".to_string(), "openai".to_string()),
+    ];
+    owned.extend(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+    );
+    crate::logging::event(level, "PROVIDER_STREAM_LIFECYCLE", owned);
+}
+
+fn openai_request_model(request: &Value) -> String {
+    request
+        .get("model")
+        .and_then(|model| model.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 /// Persistent WebSocket connection state for incremental continuation.
 /// Keeps the connection alive across turns so we can use `previous_response_id`
 /// to send only new items instead of the full conversation each turn.

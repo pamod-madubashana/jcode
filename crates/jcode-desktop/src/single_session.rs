@@ -157,6 +157,23 @@ pub(crate) struct SelectionLineSegment {
 pub(crate) struct SingleSessionStyledLine {
     pub(crate) text: String,
     pub(crate) style: SingleSessionLineStyle,
+    pub(crate) inline_spans: Vec<SingleSessionInlineSpan>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SingleSessionInlineSpan {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) kind: SingleSessionInlineSpanKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SingleSessionInlineSpanKind {
+    Code,
+    Math,
+    Strong,
+    Emphasis,
+    Strike,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,8 +229,9 @@ impl ReadOnlyInlineWidget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(crate) enum SingleSessionLineStyle {
+    #[default]
     Assistant,
     AssistantHeading,
     AssistantQuote,
@@ -233,10 +251,23 @@ pub(crate) enum SingleSessionLineStyle {
 }
 
 impl SingleSessionStyledLine {
-    fn new(text: impl Into<String>, style: SingleSessionLineStyle) -> Self {
+    pub(crate) fn new(text: impl Into<String>, style: SingleSessionLineStyle) -> Self {
         Self {
             text: text.into(),
             style,
+            inline_spans: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_inline_spans(
+        text: impl Into<String>,
+        style: SingleSessionLineStyle,
+        inline_spans: Vec<SingleSessionInlineSpan>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            inline_spans,
         }
     }
 }
@@ -250,7 +281,7 @@ pub(crate) struct StdinResponseState {
     pub(crate) input: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ModelPickerState {
     pub(crate) open: bool,
     pub(crate) loading: bool,
@@ -262,23 +293,6 @@ pub(crate) struct ModelPickerState {
     pub(crate) provider_name: Option<String>,
     pub(crate) choices: Vec<DesktopModelChoice>,
     pub(crate) error: Option<String>,
-}
-
-impl Default for ModelPickerState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            loading: false,
-            preview: false,
-            filter: String::new(),
-            selected: 0,
-            column: 0,
-            current_model: None,
-            provider_name: None,
-            choices: Vec::new(),
-            error: None,
-        }
-    }
 }
 
 impl ModelPickerState {
@@ -824,8 +838,8 @@ impl SingleSessionApp {
             && !self.model_picker.open
             && !self.session_switcher.open
             && self.stdin_response.is_none()
-            && self.show_help == false
-            && self.show_session_info == false
+            && !self.show_help
+            && !self.show_session_info
             && self.session.is_some()
     }
 
@@ -852,7 +866,7 @@ impl SingleSessionApp {
 
         #[cfg(test)]
         {
-            return 1.0;
+            1.0
         }
 
         #[cfg(not(test))]
@@ -1559,12 +1573,17 @@ impl SingleSessionApp {
                             tool_message,
                             &mut user_turn,
                             is_active_tool,
+                            if is_active_tool {
+                                Some(self.active_tool_input_buffer.as_str())
+                            } else {
+                                None
+                            },
                         );
                     }
                 }
                 continue;
             }
-            append_chat_message_lines(&mut lines, message, &mut user_turn, false);
+            append_chat_message_lines(&mut lines, message, &mut user_turn, false, None);
             message_index += 1;
         }
         if include_streaming_response && !self.streaming_response.is_empty() {
@@ -1603,6 +1622,8 @@ impl SingleSessionApp {
             .hash(&mut hasher);
         hash_messages_cache_fingerprint(&self.messages, &mut hasher);
         hash_text_cache_fingerprint(&self.streaming_response, &mut hasher);
+        self.active_tool_message_index.hash(&mut hasher);
+        hash_text_cache_fingerprint(&self.active_tool_input_buffer, &mut hasher);
         self.status.hash(&mut hasher);
         self.error.hash(&mut hasher);
         self.show_help.hash(&mut hasher);
@@ -1639,6 +1660,8 @@ impl SingleSessionApp {
             })
             .hash(&mut hasher);
         hash_messages_cache_fingerprint(&self.messages, &mut hasher);
+        self.active_tool_message_index.hash(&mut hasher);
+        hash_text_cache_fingerprint(&self.active_tool_input_buffer, &mut hasher);
         self.status.hash(&mut hasher);
         self.error.hash(&mut hasher);
         self.show_help.hash(&mut hasher);
@@ -2284,8 +2307,8 @@ impl SingleSessionApp {
         }
         let end_line = end.line.min(lines.len().saturating_sub(1));
         let mut segments = Vec::new();
-        for line_index in start.line..=end_line {
-            let line_len = lines[line_index].chars().count();
+        for (line_index, line) in lines.iter().enumerate().take(end_line + 1).skip(start.line) {
+            let line_len = line.chars().count();
             let prompt_columns = if line_index == 0 {
                 self.composer_prompt().chars().count()
             } else {
@@ -2379,8 +2402,8 @@ impl SingleSessionApp {
 
         let end_line = end.line.min(lines.len().saturating_sub(1));
         let mut segments = Vec::new();
-        for line_index in start.line..=end_line {
-            let line_len = lines[line_index].chars().count();
+        for (line_index, line) in lines.iter().enumerate().take(end_line + 1).skip(start.line) {
+            let line_len = line.chars().count();
             let start_column = if line_index == start.line {
                 start.column.min(line_len)
             } else {
@@ -2417,8 +2440,7 @@ impl SingleSessionApp {
         }
         let end_line = end.line.min(lines.len().saturating_sub(1));
         let mut selected = Vec::new();
-        for line_index in start.line..=end_line {
-            let line = &lines[line_index];
+        for (line_index, line) in lines.iter().enumerate().take(end_line + 1).skip(start.line) {
             let line_len = line.chars().count();
             let start_column = if line_index == start.line {
                 start.column.min(line_len)
@@ -3459,6 +3481,7 @@ fn append_chat_message_lines(
     message: &SingleSessionMessage,
     user_turn: &mut usize,
     is_active_tool: bool,
+    active_tool_input: Option<&str>,
 ) {
     match message.role {
         SingleSessionRole::User => {
@@ -3466,7 +3489,12 @@ fn append_chat_message_lines(
             *user_turn += 1;
         }
         SingleSessionRole::Assistant => append_assistant_lines(lines, message.content.trim()),
-        SingleSessionRole::Tool => append_tool_lines(lines, message.content.trim(), is_active_tool),
+        SingleSessionRole::Tool => append_tool_lines(
+            lines,
+            message.content.trim(),
+            is_active_tool,
+            active_tool_input,
+        ),
         SingleSessionRole::System | SingleSessionRole::Meta => {
             append_meta_lines(lines, message.content.trim())
         }
@@ -3505,6 +3533,53 @@ fn append_streaming_assistant_lines(lines: &mut Vec<SingleSessionStyledLine>, co
     lines.extend(render_assistant_markdown_lines(content));
 }
 
+fn take_current_inline_spans(
+    inline_spans: &mut Vec<SingleSessionInlineSpan>,
+    trimmed_len: usize,
+) -> Vec<SingleSessionInlineSpan> {
+    let mut spans = std::mem::take(inline_spans);
+    spans = spans
+        .into_iter()
+        .filter_map(|span| {
+            let start = span.start.min(trimmed_len);
+            let end = span.end.min(trimmed_len);
+            (start < end).then_some(SingleSessionInlineSpan {
+                start,
+                end,
+                kind: span.kind,
+            })
+        })
+        .collect();
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans
+}
+
+fn safe_utf8_prefix_len(text: &str, desired_len: usize) -> usize {
+    let mut len = desired_len.min(text.len());
+    while len > 0 && !text.is_char_boundary(len) {
+        len -= 1;
+    }
+    len
+}
+
+pub(crate) fn single_session_trimmed_line_end_preserving_inline_code_whitespace(
+    text: &str,
+    inline_spans: &[SingleSessionInlineSpan],
+) -> usize {
+    let trimmed_len = text.trim_end().len();
+    let inline_code_end = inline_spans
+        .iter()
+        .filter(|span| span.kind == SingleSessionInlineSpanKind::Code)
+        .filter_map(|span| {
+            let end = span.end.min(text.len());
+            (end > trimmed_len && text.is_char_boundary(end)).then_some(end)
+        })
+        .max()
+        .unwrap_or(trimmed_len);
+
+    trimmed_len.max(inline_code_end)
+}
+
 fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine> {
     let markdown_options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
@@ -3534,6 +3609,8 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine
 struct AssistantMarkdownRenderer {
     lines: Vec<SingleSessionStyledLine>,
     current: String,
+    current_inline_spans: Vec<SingleSessionInlineSpan>,
+    active_inline_spans: Vec<AssistantMarkdownActiveInlineSpan>,
     current_style: SingleSessionLineStyle,
     line_style_override: Option<SingleSessionLineStyle>,
     quote_depth: usize,
@@ -3546,6 +3623,12 @@ struct AssistantMarkdownRenderer {
     table: Option<AssistantMarkdownTable>,
     image_stack: Vec<AssistantMarkdownImage>,
     link_stack: Vec<AssistantMarkdownLink>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AssistantMarkdownActiveInlineSpan {
+    kind: SingleSessionInlineSpanKind,
+    start: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -3572,12 +3655,6 @@ struct AssistantMarkdownTable {
     current_cell: String,
     header_rows: usize,
     alignments: Vec<Alignment>,
-}
-
-impl Default for SingleSessionLineStyle {
-    fn default() -> Self {
-        Self::Assistant
-    }
 }
 
 impl AssistantMarkdownRenderer {
@@ -3618,12 +3695,22 @@ impl AssistantMarkdownRenderer {
             Event::End(TagEnd::Link) => self.end_link(),
             Event::Start(Tag::Image { dest_url, .. }) => self.start_image(dest_url.as_ref()),
             Event::End(TagEnd::Image) => self.end_image(),
-            Event::Start(Tag::Emphasis) => self.push_inline_marker("*"),
-            Event::End(TagEnd::Emphasis) => self.push_inline_marker("*"),
-            Event::Start(Tag::Strong) => self.push_inline_marker("**"),
-            Event::End(TagEnd::Strong) => self.push_inline_marker("**"),
-            Event::Start(Tag::Strikethrough) => self.push_inline_marker("~~"),
-            Event::End(TagEnd::Strikethrough) => self.push_inline_marker("~~"),
+            Event::Start(Tag::Emphasis) => {
+                self.start_inline_span(SingleSessionInlineSpanKind::Emphasis)
+            }
+            Event::End(TagEnd::Emphasis) => {
+                self.end_inline_span(SingleSessionInlineSpanKind::Emphasis)
+            }
+            Event::Start(Tag::Strong) => {
+                self.start_inline_span(SingleSessionInlineSpanKind::Strong)
+            }
+            Event::End(TagEnd::Strong) => self.end_inline_span(SingleSessionInlineSpanKind::Strong),
+            Event::Start(Tag::Strikethrough) => {
+                self.start_inline_span(SingleSessionInlineSpanKind::Strike)
+            }
+            Event::End(TagEnd::Strikethrough) => {
+                self.end_inline_span(SingleSessionInlineSpanKind::Strike)
+            }
             Event::Text(text) => self.push_text(text.as_ref()),
             Event::Code(code) => self.push_inline_code(code.as_ref()),
             Event::InlineMath(math) => self.push_inline_math(math.as_ref()),
@@ -3950,53 +4037,71 @@ impl AssistantMarkdownRenderer {
 
     fn push_inline_code(&mut self, code: &str) {
         if let Some(image) = self.image_stack.last_mut() {
-            image.alt_text.push('`');
             image.alt_text.push_str(code);
-            image.alt_text.push('`');
             return;
         }
         if let Some(table) = &mut self.table {
-            table.push_text("`");
             table.push_text(code);
-            table.push_text("`");
             return;
         }
         self.begin_line_if_needed();
-        self.current.push('`');
+        let start = self.current.len();
         self.current.push_str(code);
-        self.current.push('`');
-    }
-
-    fn push_inline_marker(&mut self, marker: &str) {
-        if let Some(image) = self.image_stack.last_mut() {
-            image.alt_text.push_str(marker);
-            return;
-        }
-        if let Some(table) = &mut self.table {
-            table.push_text(marker);
-            return;
-        }
-        self.begin_line_if_needed();
-        self.current.push_str(marker);
+        self.push_current_inline_span(start, self.current.len(), SingleSessionInlineSpanKind::Code);
     }
 
     fn push_inline_math(&mut self, math: &str) {
         if let Some(image) = self.image_stack.last_mut() {
-            image.alt_text.push('$');
             image.alt_text.push_str(math);
-            image.alt_text.push('$');
             return;
         }
         if let Some(table) = &mut self.table {
-            table.push_text("$");
             table.push_text(math);
-            table.push_text("$");
             return;
         }
         self.begin_line_if_needed();
-        self.current.push('$');
+        let start = self.current.len();
         self.current.push_str(math);
-        self.current.push('$');
+        self.push_current_inline_span(start, self.current.len(), SingleSessionInlineSpanKind::Math);
+    }
+
+    fn start_inline_span(&mut self, kind: SingleSessionInlineSpanKind) {
+        if self.image_stack.last_mut().is_some() || self.table.is_some() {
+            return;
+        }
+        self.begin_line_if_needed();
+        self.active_inline_spans
+            .push(AssistantMarkdownActiveInlineSpan {
+                kind,
+                start: self.current.len(),
+            });
+    }
+
+    fn end_inline_span(&mut self, kind: SingleSessionInlineSpanKind) {
+        if self.image_stack.last_mut().is_some() || self.table.is_some() {
+            return;
+        }
+        let Some(index) = self
+            .active_inline_spans
+            .iter()
+            .rposition(|span| span.kind == kind)
+        else {
+            return;
+        };
+        let active = self.active_inline_spans.remove(index);
+        self.push_current_inline_span(active.start, self.current.len(), kind);
+    }
+
+    fn push_current_inline_span(
+        &mut self,
+        start: usize,
+        end: usize,
+        kind: SingleSessionInlineSpanKind,
+    ) {
+        if start < end {
+            self.current_inline_spans
+                .push(SingleSessionInlineSpan { start, end, kind });
+        }
     }
 
     fn push_display_math(&mut self, math: &str) {
@@ -4096,10 +4201,19 @@ impl AssistantMarkdownRenderer {
         if !self.pending_line_prefix.is_empty() {
             self.current.push_str(&self.pending_line_prefix);
             self.pending_line_prefix.clear();
+            self.reset_active_inline_span_starts();
             return;
         }
         if self.quote_depth > 0 {
             self.current.push_str(&self.quote_prefix());
+            self.reset_active_inline_span_starts();
+        }
+    }
+
+    fn reset_active_inline_span_starts(&mut self) {
+        let start = self.current.len();
+        for span in &mut self.active_inline_spans {
+            span.start = start;
         }
     }
 
@@ -4133,11 +4247,25 @@ impl AssistantMarkdownRenderer {
     }
 
     fn flush_current_line_as(&mut self, style: SingleSessionLineStyle) {
-        let trimmed = self.current.trim_end();
-        if !trimmed.is_empty() {
-            self.lines.push(styled_line(trimmed, style));
+        let trimmed_len = single_session_trimmed_line_end_preserving_inline_code_whitespace(
+            &self.current,
+            &self.current_inline_spans,
+        );
+        if trimmed_len > 0 {
+            let safe_trimmed_len = safe_utf8_prefix_len(&self.current, trimmed_len);
+            let trimmed = &self.current[..safe_trimmed_len];
+            let inline_spans =
+                take_current_inline_spans(&mut self.current_inline_spans, safe_trimmed_len);
+            self.lines.push(SingleSessionStyledLine::with_inline_spans(
+                trimmed,
+                style,
+                inline_spans,
+            ));
+        } else {
+            self.current_inline_spans.clear();
         }
         self.current.clear();
+        self.active_inline_spans.clear();
         self.line_style_override = None;
     }
 
@@ -4353,7 +4481,12 @@ fn format_table_separator(widths: &[usize], alignments: &[Alignment]) -> String 
     rendered
 }
 
-fn append_tool_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str, active: bool) {
+fn append_tool_lines(
+    lines: &mut Vec<SingleSessionStyledLine>,
+    content: &str,
+    active: bool,
+    active_input: Option<&str>,
+) {
     if content.is_empty() {
         return;
     }
@@ -4381,6 +4514,9 @@ fn append_tool_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str, ac
         } else if !line.trim().is_empty() {
             widget_lines.push(compact_tool_widget_text(line.trim(), 112));
         }
+    }
+    if let Some(raw_input) = active_input.filter(|input| !input.is_empty()) {
+        metadata_lines.extend(formatted_tool_input_lines(&header.name, raw_input));
     }
 
     lines.push(styled_line(
@@ -4566,7 +4702,6 @@ fn tool_summary_name(content: &str) -> String {
         .next()
         .unwrap_or("tool")
         .trim_start_matches(['▾', '▸'])
-        .trim()
         .split_whitespace()
         .next()
         .filter(|name| !name.is_empty())
@@ -4944,6 +5079,11 @@ pub(crate) fn single_session_surface(
     let lines = single_session_lines(session);
     workspace::Surface {
         id: 1,
+        kind: if session.is_some() {
+            workspace::SurfaceKind::Session
+        } else {
+            workspace::SurfaceKind::Scratch
+        },
         title: session
             .map(|session| session.title.clone())
             .unwrap_or_else(|| "new jcode session".to_string()),
@@ -5032,7 +5172,7 @@ mod tests {
 
     fn rendered_tool_text(content: &str, active: bool) -> Vec<String> {
         let mut lines = Vec::new();
-        append_tool_lines(&mut lines, content, active);
+        append_tool_lines(&mut lines, content, active, None);
         lines.into_iter().map(|line| line.text).collect()
     }
 
@@ -5148,5 +5288,17 @@ mod tests {
             "{\"intent\":\"describe action\",\"query\":\"tool calls\"}",
         );
         assert_eq!(lines, vec!["query: tool calls", "intent: describe action"]);
+    }
+
+    #[test]
+    fn safe_utf8_prefix_len_rounds_down_to_char_boundary() {
+        let text = "aé🚀";
+
+        assert_eq!(safe_utf8_prefix_len(text, 0), 0);
+        assert_eq!(safe_utf8_prefix_len(text, 1), 1);
+        assert_eq!(safe_utf8_prefix_len(text, 2), 1);
+        assert_eq!(safe_utf8_prefix_len(text, 3), 3);
+        assert_eq!(safe_utf8_prefix_len(text, 6), 3);
+        assert_eq!(safe_utf8_prefix_len(text, usize::MAX), text.len());
     }
 }

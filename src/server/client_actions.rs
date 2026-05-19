@@ -593,17 +593,43 @@ pub(super) async fn handle_rename_session(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    let started = Instant::now();
     let normalized_title = title
         .as_deref()
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(ToOwned::to_owned);
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "rename_start".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+            (
+                "title_chars",
+                normalized_title
+                    .as_ref()
+                    .map(|title| title.chars().count().to_string())
+                    .unwrap_or_else(|| "0".to_string()),
+            ),
+        ],
+    );
 
     let (renamed_session_id, display_title) = {
         let mut agent_guard = agent.lock().await;
         match agent_guard.rename_session_title(normalized_title.clone()) {
             Ok(display_title) => (agent_guard.session_id().to_string(), display_title),
             Err(error) => {
+                crate::logging::event_warn(
+                    "SESSION_LIFECYCLE",
+                    vec![
+                        ("phase", "rename_error".to_string()),
+                        ("request_id", id.to_string()),
+                        ("session_id", client_session_id.to_string()),
+                        ("error", crate::util::format_error_chain(&error)),
+                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                    ],
+                );
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: crate::util::format_error_chain(&error),
@@ -629,6 +655,17 @@ pub(super) async fn handle_rename_session(
         let _ = client_event_tx.send(event);
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "rename_done".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", renamed_session_id),
+            ("client_session_id", client_session_id.to_string()),
+            ("delivered", delivered.to_string()),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
 }
 
 pub(super) async fn handle_trigger_memory_extraction(
@@ -718,9 +755,28 @@ pub(super) async fn handle_split(
     client_session_id: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    let started = Instant::now();
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "split_start".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+        ],
+    );
     let (new_session_id, new_session_name) = match clone_split_session(client_session_id) {
         Ok(result) => result,
         Err(e) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "split_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&e)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Failed to save split session: {e}"),
@@ -729,6 +785,16 @@ pub(super) async fn handle_split(
             return;
         }
     };
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "split_done".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+            ("new_session_id", new_session_id.clone()),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
 
     let _ = client_event_tx.send(ServerEvent::SplitResponse {
         id,
@@ -743,9 +809,28 @@ pub(super) async fn handle_transfer(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    let started = Instant::now();
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "transfer_start".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+        ],
+    );
     let parent = match Session::load(client_session_id) {
         Ok(session) => session,
         Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_load_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Failed to load session for transfer: {error}"),
@@ -769,6 +854,16 @@ pub(super) async fn handle_transfer(
     {
         Ok(compaction) => compaction,
         Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_compaction_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Failed to compact session for transfer: {error}"),
@@ -782,6 +877,16 @@ pub(super) async fn handle_transfer(
         match create_transfer_child_session(client_session_id, &parent, transfer_compaction) {
             Ok(result) => result,
             Err(error) => {
+                crate::logging::event_warn(
+                    "SESSION_LIFECYCLE",
+                    vec![
+                        ("phase", "transfer_create_error".to_string()),
+                        ("request_id", id.to_string()),
+                        ("session_id", client_session_id.to_string()),
+                        ("error", crate::util::format_error_chain(&error)),
+                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                    ],
+                );
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: format!("Failed to create transfer session: {error}"),
@@ -790,6 +895,16 @@ pub(super) async fn handle_transfer(
                 return;
             }
         };
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "transfer_done".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+            ("new_session_id", new_session_id.clone()),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
 
     let _ = client_event_tx.send(ServerEvent::SplitResponse {
         id,

@@ -921,7 +921,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                     .map(|t| t.elapsed())
                     .or(app.processing_started.map(|t| t.elapsed()))
             ));
-            let _ = remote.cancel().await;
+            let _ = remote.cancel_with_reason("stall_guard").await;
             app.is_processing = false;
             app.clear_visible_turn_started();
             app.status = ProcessingStatus::Idle;

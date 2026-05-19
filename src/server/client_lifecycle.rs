@@ -109,6 +109,163 @@ struct SwarmStatusRefs<'a> {
     event_tx: &'a broadcast::Sender<SwarmEvent>,
 }
 
+fn interrupt_request_log_fields(
+    request: &Request,
+    client_session_id: &str,
+    client_is_processing: bool,
+    message_id: Option<u64>,
+    has_task: bool,
+    line_bytes: usize,
+) -> Option<String> {
+    let base = |kind: &str, id: u64| {
+        format!(
+            "kind={} id={} session={} client_processing={} message_id={:?} has_task={} line_bytes={}",
+            kind, id, client_session_id, client_is_processing, message_id, has_task, line_bytes
+        )
+    };
+
+    match request {
+        Request::Cancel { id } => Some(base("cancel", *id)),
+        Request::SoftInterrupt {
+            id,
+            content,
+            urgent,
+        } => Some(format!(
+            "{} urgent={} content_bytes={} content_chars={}",
+            base("soft_interrupt", *id),
+            urgent,
+            content.len(),
+            content.chars().count()
+        )),
+        Request::CancelSoftInterrupts { id } => Some(base("cancel_soft_interrupts", *id)),
+        Request::BackgroundTool { id } => Some(base("background_tool", *id)),
+        _ => None,
+    }
+}
+
+fn request_type_from_line(line: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn request_type_is_read_only(kind: &str) -> bool {
+    matches!(
+        kind,
+        "ping"
+            | "state"
+            | "get_history"
+            | "get_model_catalog"
+            | "get_compacted_history"
+            | "agent_capabilities"
+            | "agent_context"
+            | "comm_read"
+            | "comm_list"
+            | "comm_list_channels"
+            | "comm_channel_members"
+            | "comm_summary"
+            | "comm_status"
+            | "comm_plan_status"
+            | "comm_read_context"
+            | "comm_await_members"
+    )
+}
+
+fn request_payload_summary(kind: &str, line: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+        let bytes_chars =
+            |name: &str, value: &serde_json::Value, fields: &mut Vec<(String, String)>| {
+                if let Some(text) = value.get(name).and_then(|v| v.as_str()) {
+                    fields.push((format!("{}_bytes", name), text.len().to_string()));
+                    fields.push((format!("{}_chars", name), text.chars().count().to_string()));
+                }
+            };
+        for name in [
+            "content", "message", "prompt", "task", "command", "input", "value",
+        ] {
+            bytes_chars(name, &value, &mut fields);
+        }
+        if let Some(images) = value.get("images").and_then(|v| v.as_array()) {
+            fields.push(("image_count".to_string(), images.len().to_string()));
+        }
+        if let Some(session_id) = value.get("session_id").and_then(|v| v.as_str()) {
+            fields.push(("request_session_id".to_string(), session_id.to_string()));
+        }
+        if let Some(target_session) = value.get("target_session").and_then(|v| v.as_str()) {
+            fields.push(("target_session".to_string(), target_session.to_string()));
+        }
+        if let Some(client_instance_id) = value.get("client_instance_id").and_then(|v| v.as_str()) {
+            fields.push((
+                "request_client_instance_id".to_string(),
+                client_instance_id.to_string(),
+            ));
+        }
+        if matches!(kind, "set_model" | "set_subagent_model")
+            && let Some(model) = value.get("model").and_then(|v| v.as_str())
+        {
+            fields.push(("model".to_string(), model.to_string()));
+        }
+        if let Some(title) = value.get("title").and_then(|v| v.as_str()) {
+            fields.push(("title_chars".to_string(), title.chars().count().to_string()));
+        }
+    }
+    fields
+}
+
+fn server_request_lifecycle_fields(
+    phase: &str,
+    request_id: u64,
+    request_kind: &str,
+    client_session_id: &str,
+    client_connection_id: &str,
+    client_instance_id: Option<&str>,
+    client_is_processing: bool,
+    message_id: Option<u64>,
+    processing_session_id: Option<&str>,
+    line_bytes: usize,
+) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("phase".to_string(), phase.to_string()),
+        ("request_id".to_string(), request_id.to_string()),
+        ("request_kind".to_string(), request_kind.to_string()),
+        ("session_id".to_string(), client_session_id.to_string()),
+        (
+            "client_connection_id".to_string(),
+            client_connection_id.to_string(),
+        ),
+        (
+            "client_instance_id".to_string(),
+            client_instance_id.unwrap_or("none").to_string(),
+        ),
+        (
+            "client_processing".to_string(),
+            client_is_processing.to_string(),
+        ),
+        (
+            "message_id".to_string(),
+            message_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        ),
+        (
+            "processing_session_id".to_string(),
+            processing_session_id.unwrap_or("none").to_string(),
+        ),
+        ("line_bytes".to_string(), line_bytes.to_string()),
+    ];
+    if let Some(ctx_session) = crate::logging::current_session() {
+        fields.push(("log_context_session_id".to_string(), ctx_session));
+    }
+    fields
+}
+
 fn server_reload_starting() -> bool {
     matches!(
         crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
@@ -912,6 +1069,7 @@ pub(super) async fn handle_client(
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
+    let mut current_client_instance_id: Option<String> = None;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -1314,14 +1472,141 @@ pub(super) async fn handle_client(
                 }
             }
         };
+        let request_decoded_at = Instant::now();
+        let request_id = request.id();
+        let request_kind = request_type_from_line(&line);
+        let request_lifecycle_logged = !request_type_is_read_only(&request_kind);
+        let request_lifecycle_start = Instant::now();
+        if request_lifecycle_logged {
+            let mut fields = server_request_lifecycle_fields(
+                "received",
+                request_id,
+                &request_kind,
+                &client_session_id,
+                &client_connection_id,
+                current_client_instance_id.as_deref(),
+                client_is_processing,
+                processing_message_id,
+                processing_session_id.as_deref(),
+                line.len(),
+            );
+            fields.extend(request_payload_summary(&request_kind, &line));
+            crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
+        }
+        if let Some(fields) = interrupt_request_log_fields(
+            &request,
+            &client_session_id,
+            client_is_processing,
+            processing_message_id,
+            processing_task.is_some(),
+            line.len(),
+        ) {
+            crate::logging::info(&format!("SERVER_INTERRUPT_REQUEST_DECODED {}", fields));
+        }
+
+        // A cancellation request must never be gated on writing an Ack to the client.
+        // The normal Ack path takes the shared outbound writer before dispatching the
+        // request. During heavy streaming, history replay, or client-side backpressure,
+        // that writer can be busy long enough that an already-decoded cancel would sit
+        // behind outbound bytes instead of signalling the agent's lock-free cancel
+        // handle. Queue the Ack through the event channel and signal cancellation first.
+        if let Request::Cancel { id } = request {
+            let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_PRE_ACK_DISPATCH id={} session={} ack_queued={} decoded_to_dispatch_ms={}",
+                id,
+                client_session_id,
+                ack_queued,
+                request_decoded_at.elapsed().as_millis()
+            ));
+            let cancel_dispatch_start = Instant::now();
+            cancel_processing_message(
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &session_control,
+                &client_event_tx,
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+                Some(id),
+                Some(request_decoded_at),
+            )
+            .await;
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_PRE_ACK_DONE id={} session={} dispatch_ms={} total_since_decode_ms={}",
+                id,
+                client_session_id,
+                cancel_dispatch_start.elapsed().as_millis(),
+                request_decoded_at.elapsed().as_millis()
+            ));
+            if !client_is_processing {
+                let mut connections = client_connections.write().await;
+                if let Some(info) = connections.get_mut(&client_connection_id) {
+                    info.is_processing = false;
+                    info.current_tool_name = None;
+                }
+            }
+            continue;
+        }
 
         // Send ack
         let ack = ServerEvent::Ack { id: request.id() };
         let json = encode_event(&ack);
         {
+            let ack_start = Instant::now();
             let mut w = writer.lock().await;
             if w.write_all(json.as_bytes()).await.is_err() {
+                if request_lifecycle_logged {
+                    let mut fields = server_request_lifecycle_fields(
+                        "ack_write_failed",
+                        request_id,
+                        &request_kind,
+                        &client_session_id,
+                        &client_connection_id,
+                        current_client_instance_id.as_deref(),
+                        client_is_processing,
+                        processing_message_id,
+                        processing_session_id.as_deref(),
+                        line.len(),
+                    );
+                    fields.push((
+                        "ack_write_ms".to_string(),
+                        ack_start.elapsed().as_millis().to_string(),
+                    ));
+                    crate::logging::event_warn("SERVER_REQUEST_LIFECYCLE", fields);
+                }
                 break;
+            }
+            if request_lifecycle_logged {
+                let mut fields = server_request_lifecycle_fields(
+                    "acked",
+                    request_id,
+                    &request_kind,
+                    &client_session_id,
+                    &client_connection_id,
+                    current_client_instance_id.as_deref(),
+                    client_is_processing,
+                    processing_message_id,
+                    processing_session_id.as_deref(),
+                    line.len(),
+                );
+                fields.push((
+                    "ack_write_ms".to_string(),
+                    ack_start.elapsed().as_millis().to_string(),
+                ));
+                fields.push((
+                    "since_decode_ms".to_string(),
+                    request_decoded_at.elapsed().as_millis().to_string(),
+                ));
+                crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
             }
         }
 
@@ -1368,7 +1653,6 @@ pub(super) async fn handle_client(
             }
 
             Request::Cancel { id } => {
-                let _ = id;
                 cancel_processing_message(
                     &mut ProcessingState {
                         client_is_processing: &mut client_is_processing,
@@ -1385,6 +1669,8 @@ pub(super) async fn handle_client(
                         event_counter: &event_counter,
                         event_tx: &swarm_event_tx,
                     },
+                    Some(id),
+                    Some(request_decoded_at),
                 )
                 .await;
                 if !client_is_processing {
@@ -1588,6 +1874,7 @@ pub(super) async fn handle_client(
                 client_has_local_history,
                 allow_session_takeover,
             } => {
+                current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
@@ -1810,6 +2097,7 @@ pub(super) async fn handle_client(
                 client_has_local_history,
                 allow_session_takeover,
             } => {
+                current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
@@ -2666,6 +2954,29 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
+        if request_lifecycle_logged {
+            let mut fields = server_request_lifecycle_fields(
+                "handled",
+                request_id,
+                &request_kind,
+                &client_session_id,
+                &client_connection_id,
+                current_client_instance_id.as_deref(),
+                client_is_processing,
+                processing_message_id,
+                processing_session_id.as_deref(),
+                line.len(),
+            );
+            fields.push((
+                "handler_total_ms".to_string(),
+                request_lifecycle_start.elapsed().as_millis().to_string(),
+            ));
+            fields.push((
+                "since_decode_ms".to_string(),
+                request_decoded_at.elapsed().as_millis().to_string(),
+            ));
+            crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
+        }
     }
 
     cleanup_client_connection(
@@ -2807,52 +3118,74 @@ async fn cancel_processing_message(
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     swarm: &SwarmStatusRefs<'_>,
+    request_id: Option<u64>,
+    request_decoded_at: Option<Instant>,
 ) {
+    let cancel_start = Instant::now();
     let session_label = state
         .session_id
         .as_deref()
         .unwrap_or(session_control.session_id.as_str())
         .to_string();
     crate::logging::info(&format!(
-        "cancel request received: session={} control_session={} client_processing={} message_id={:?} has_task={}",
+        "SERVER_INTERRUPT_CANCEL_RECEIVED request_id={:?} session={} control_session={} client_processing={} message_id={:?} has_task={} decoded_age_ms={:?}",
+        request_id,
         session_label,
         session_control.session_id,
         *state.client_is_processing,
         *state.message_id,
-        state.task.is_some()
+        state.task.is_some(),
+        request_decoded_at.map(|instant| instant.elapsed().as_millis())
     ));
     if let Some(mut handle) = state.task.take() {
         if handle.is_finished() {
             crate::logging::info(&format!(
-                "cancel request ignored because processing task is already finished: session={} message_id={:?}",
-                session_label, *state.message_id
+                "SERVER_INTERRUPT_CANCEL_IGNORED_FINISHED request_id={:?} session={} message_id={:?} total_ms={}",
+                request_id,
+                session_label,
+                *state.message_id,
+                cancel_start.elapsed().as_millis()
             ));
             *state.task = Some(handle);
             return;
         }
         session_control.request_cancel();
         crate::logging::info(&format!(
-            "cancel request signalled active turn: session={} message_id={:?}; waiting up to 500ms for cooperative stop",
-            session_label, *state.message_id
+            "SERVER_INTERRUPT_CANCEL_SIGNALLED request_id={:?} session={} message_id={:?} wait_ms=500",
+            request_id, session_label, *state.message_id
         ));
         match tokio::time::timeout(std::time::Duration::from_millis(500), &mut handle).await {
             Ok(_) => {
                 crate::logging::info(&format!(
-                    "cancel request completed cooperatively: session={} message_id={:?}",
-                    session_label, *state.message_id
+                    "SERVER_INTERRUPT_CANCEL_COOPERATIVE_DONE request_id={:?} session={} message_id={:?} elapsed_ms={}",
+                    request_id,
+                    session_label,
+                    *state.message_id,
+                    cancel_start.elapsed().as_millis()
                 ));
             }
             Err(_) => {
                 crate::logging::warn(&format!(
-                    "cancel request did not complete cooperatively within 500ms; aborting task: session={} message_id={:?}",
-                    session_label, *state.message_id
+                    "SERVER_INTERRUPT_CANCEL_COOPERATIVE_TIMEOUT request_id={:?} session={} message_id={:?} elapsed_ms={} action=abort_task",
+                    request_id,
+                    session_label,
+                    *state.message_id,
+                    cancel_start.elapsed().as_millis()
                 ));
                 handle.abort();
                 match tokio::time::timeout(std::time::Duration::from_millis(2000), handle).await {
-                    Ok(_) => crate::logging::info("Aborted processing task released resources"),
-                    Err(_) => crate::logging::warn(
-                        "Aborted processing task did not release resources within 2s",
-                    ),
+                    Ok(_) => crate::logging::info(&format!(
+                        "SERVER_INTERRUPT_CANCEL_ABORT_RELEASED request_id={:?} session={} elapsed_ms={}",
+                        request_id,
+                        session_label,
+                        cancel_start.elapsed().as_millis()
+                    )),
+                    Err(_) => crate::logging::warn(&format!(
+                        "SERVER_INTERRUPT_CANCEL_ABORT_RELEASE_TIMEOUT request_id={:?} session={} elapsed_ms={} wait_ms=2000",
+                        request_id,
+                        session_label,
+                        cancel_start.elapsed().as_millis()
+                    )),
                 }
             }
         }
@@ -2875,10 +3208,18 @@ async fn cancel_processing_message(
         if let Some(message_id) = state.message_id.take() {
             let _ = client_event_tx.send(ServerEvent::Interrupted);
             let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
+                request_id,
+                session_label,
+                message_id,
+                cancel_start.elapsed().as_millis()
+            ));
         }
     } else {
         crate::logging::warn(&format!(
-            "cancel request had no local processing task to stop: session={} control_session={} client_processing={} message_id={:?}; signalling session cancel handle anyway",
+            "SERVER_INTERRUPT_CANCEL_NO_LOCAL_TASK request_id={:?} session={} control_session={} client_processing={} message_id={:?}; signalling session cancel handle anyway",
+            request_id,
             session_label,
             session_control.session_id,
             *state.client_is_processing,
@@ -2909,6 +3250,20 @@ async fn cancel_processing_message(
         let _ = client_event_tx.send(ServerEvent::Interrupted);
         if let Some(message_id) = state.message_id.take() {
             let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
+                request_id,
+                session_label,
+                message_id,
+                cancel_start.elapsed().as_millis()
+            ));
+        } else {
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id=None total_ms={}",
+                request_id,
+                session_label,
+                cancel_start.elapsed().as_millis()
+            ));
         }
     }
 }
@@ -2926,8 +3281,18 @@ fn queue_soft_interrupt(
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let _ = session_control.queue_soft_interrupt(content, urgent, source);
-    let _ = client_event_tx.send(ServerEvent::Ack { id });
+    let content_bytes = content.len();
+    let content_chars = content.chars().count();
+    crate::logging::info(&format!(
+        "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
+        id, session_control.session_id, source, urgent, content_bytes, content_chars
+    ));
+    let queued = session_control.queue_soft_interrupt(content, urgent, source);
+    let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+    crate::logging::info(&format!(
+        "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",
+        id, session_control.session_id, queued, ack_queued
+    ));
 }
 
 fn clear_soft_interrupts(
@@ -2936,14 +3301,26 @@ fn clear_soft_interrupts(
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    crate::logging::info(&format!(
+        "SERVER_SOFT_INTERRUPT_CLEAR_REQUEST id={} session={} control_session={}",
+        id, session_id, session_control.session_id
+    ));
     session_control.clear_soft_interrupts();
-    if let Err(err) = crate::soft_interrupt_store::clear(session_id) {
-        crate::logging::warn(&format!(
-            "Failed to clear persisted soft interrupts for {}: {}",
-            session_id, err
-        ));
-    }
-    let _ = client_event_tx.send(ServerEvent::Ack { id });
+    let persisted_clear = match crate::soft_interrupt_store::clear(session_id) {
+        Ok(()) => true,
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "SERVER_SOFT_INTERRUPT_CLEAR_PERSISTED_FAILED id={} session={} error={}",
+                id, session_id, err
+            ));
+            false
+        }
+    };
+    let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+    crate::logging::info(&format!(
+        "SERVER_SOFT_INTERRUPT_CLEAR_RESULT id={} session={} persisted_clear={} ack_queued={}",
+        id, session_id, persisted_clear, ack_queued
+    ));
 }
 
 fn move_tool_to_background(
@@ -2951,8 +3328,16 @@ fn move_tool_to_background(
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    session_control.request_background_current_tool();
-    let _ = client_event_tx.send(ServerEvent::Ack { id });
+    crate::logging::info(&format!(
+        "SERVER_BACKGROUND_TOOL_REQUEST id={} session={}",
+        id, session_control.session_id
+    ));
+    let signalled = session_control.request_background_current_tool();
+    let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+    crate::logging::info(&format!(
+        "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
+        id, session_control.session_id, signalled, ack_queued
+    ));
 }
 
 /// Process a message and stream events (mpsc channel - per-client)

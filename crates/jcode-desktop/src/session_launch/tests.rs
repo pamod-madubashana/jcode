@@ -3,11 +3,12 @@
 use super::events::desktop_event_from_server_value;
 use super::*;
 use serde_json::{Value, json};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(unix)]
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -133,6 +134,26 @@ fn desktop_event_parser_maps_streaming_server_events() {
             tool_call_id: "tool-1".to_string()
         })
     );
+    assert_eq!(
+        desktop_event_from_server_value(&json!({
+            "type": "stdin_request",
+            "prompt": "Password:",
+            "is_password": true,
+            "tool_call_id": "tool-1"
+        })),
+        None,
+        "malformed stdin requests must not fall back to request_id=unknown"
+    );
+    assert_eq!(
+        desktop_event_from_server_value(&json!({
+            "type": "stdin_request",
+            "request_id": "stdin-1",
+            "prompt": "Password:",
+            "is_password": true
+        })),
+        None,
+        "malformed stdin requests must not fall back to tool_call_id=unknown"
+    );
 }
 
 #[test]
@@ -161,6 +182,22 @@ fn desktop_session_handle_sends_stdin_response_command() {
             input: "secret".to_string()
         })
     );
+}
+
+#[test]
+fn desktop_session_worker_slots_are_bounded_and_released() -> Result<()> {
+    let counter = AtomicUsize::new(0);
+    let first = try_acquire_desktop_session_worker_slot(&counter, 2)?;
+    let second = try_acquire_desktop_session_worker_slot(&counter, 2)?;
+
+    assert!(try_acquire_desktop_session_worker_slot(&counter, 2).is_err());
+    drop(first);
+    let third = try_acquire_desktop_session_worker_slot(&counter, 2)?;
+    assert!(try_acquire_desktop_session_worker_slot(&counter, 2).is_err());
+    drop(second);
+    drop(third);
+    assert_eq!(counter.load(Ordering::Relaxed), 0);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -283,6 +320,237 @@ fn desktop_worker_emits_reloaded_before_real_done_after_fake_reload() -> Result<
         .expect("worker should forward real message Done after reconnect");
     assert!(reload_index < reloaded_index);
     assert!(reloaded_index < done_index);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_worker_rejects_reconnect_session_id_mismatch() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-worker-reload-mismatch-old-{}-{nonce}.sock",
+        std::process::id(),
+    ));
+    let new_socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-worker-reload-mismatch-new-{}-{nonce}.sock",
+        std::process::id(),
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&new_socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
+    let new_listener = UnixListener::bind(&new_socket_path)?;
+    let previous_socket = std::env::var_os("JCODE_SOCKET");
+    unsafe {
+        std::env::set_var("JCODE_SOCKET", &socket_path);
+    }
+
+    let server = std::thread::spawn(move || {
+        fake_desktop_server_reload_session_mismatch(listener, new_listener, new_socket_path)
+    });
+    let (event_tx, event_rx) = mpsc::channel();
+    let (_command_tx, command_rx) = mpsc::channel();
+
+    let result = run_server_session(None, "hello reload", Vec::new(), Some(event_tx), command_rx);
+
+    restore_env_var("JCODE_SOCKET", previous_socket);
+    let _ = std::fs::remove_file(&socket_path);
+
+    let error = result.expect_err("reconnect must reject a different session id");
+    assert!(
+        format!("{error:#}").contains("unexpected session id"),
+        "{error:#}"
+    );
+    let requests = server.join().unwrap()?;
+    assert_eq!(
+        requests[3]["target_session_id"],
+        "session_desktop_reload_fake"
+    );
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, DesktopSessionEvent::Reloading { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, DesktopSessionEvent::Reloaded { .. })),
+        "must not report reload success for the wrong session: {events:?}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_worker_rejects_malformed_server_event_lines() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-worker-malformed-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
+    let previous_socket = std::env::var_os("JCODE_SOCKET");
+    unsafe {
+        std::env::set_var("JCODE_SOCKET", &socket_path);
+    }
+
+    let server = std::thread::spawn(move || fake_desktop_server_malformed_event(listener));
+    let (event_tx, _event_rx) = mpsc::channel();
+    let (_command_tx, command_rx) = mpsc::channel();
+
+    let result = run_server_session(
+        None,
+        "hello malformed",
+        Vec::new(),
+        Some(event_tx),
+        command_rx,
+    );
+
+    restore_env_var("JCODE_SOCKET", previous_socket);
+    let _ = std::fs::remove_file(&socket_path);
+
+    let error = result.expect_err("malformed JSON must fail the session worker");
+    assert!(
+        format!("{error:#}").contains("failed to parse jcode server event"),
+        "{error:#}"
+    );
+    let requests = server.join().unwrap()?;
+    assert_eq!(requests[2]["type"], "message");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn drain_session_events_treats_cancel_completion_as_terminal() -> Result<()> {
+    let (client, server) = UnixStream::pair()?;
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    server.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut writer = client.try_clone()?;
+    let reader = BufReader::new(client);
+    let mut server_writer = server.try_clone()?;
+    let mut server_reader = BufReader::new(server);
+
+    let server = std::thread::spawn(move || -> Result<Value> {
+        let request = read_fake_server_request(&mut server_reader)?;
+        assert_eq!(request["type"], "cancel");
+        write_json_line(
+            &mut server_writer,
+            json!({"type": "done", "id": request["id"]}),
+        )?;
+        Ok(request)
+    });
+
+    let (command_tx, command_rx) = mpsc::channel();
+    command_tx.send(DesktopSessionCommand::Cancel).unwrap();
+    let (event_tx, event_rx) = mpsc::channel();
+    let mut next_request_id = 2_u64;
+
+    let outcome = drain_session_events(
+        reader,
+        &mut writer,
+        &mut next_request_id,
+        Some(&event_tx),
+        &command_rx,
+        1,
+    )?;
+
+    assert!(matches!(outcome, DrainOutcome::Terminal));
+    let request = server.join().unwrap()?;
+    assert_eq!(request["id"], 2);
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(events.contains(&DesktopSessionEvent::Status("cancelling".to_string())));
+    assert!(events.contains(&DesktopSessionEvent::Status("cancelled".to_string())));
+    assert!(events.contains(&DesktopSessionEvent::Done));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_reload_socket_path_requires_owned_socket_in_current_directory() -> Result<()> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let current_socket = std::env::temp_dir().join(format!(
+        "jcode-desktop-reload-validate-current-{}-{nonce}.sock",
+        std::process::id(),
+    ));
+    let new_socket = std::env::temp_dir().join(format!(
+        "jcode-desktop-reload-validate-new-{}-{nonce}.sock",
+        std::process::id(),
+    ));
+    let non_socket = std::env::temp_dir().join(format!(
+        "jcode-desktop-reload-validate-file-{}-{nonce}",
+        std::process::id(),
+    ));
+    let _ = std::fs::remove_file(&current_socket);
+    let _ = std::fs::remove_file(&new_socket);
+    let _ = std::fs::remove_file(&non_socket);
+    let current_listener = UnixListener::bind(&current_socket)?;
+    let new_listener = UnixListener::bind(&new_socket)?;
+
+    assert_eq!(
+        validate_reload_socket_path(&current_socket, new_socket.to_str().unwrap())?,
+        new_socket
+    );
+    assert!(validate_reload_socket_path(&current_socket, "relative.sock").is_err());
+
+    std::fs::write(&non_socket, b"not a socket")?;
+    let error = validate_reload_socket_path(&current_socket, non_socket.to_str().unwrap())
+        .expect_err("plain files must be rejected as reload sockets");
+    assert!(format!("{error:#}").contains("not a socket"), "{error:#}");
+
+    drop(current_listener);
+    drop(new_listener);
+    let _ = std::fs::remove_file(&current_socket);
+    let _ = std::fs::remove_file(&new_socket);
+    let _ = std::fs::remove_file(&non_socket);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_send_message_uses_shared_server_instead_of_prompt_argv() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-workspace-send-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
+    let previous_socket = std::env::var_os("JCODE_SOCKET");
+    unsafe {
+        std::env::set_var("JCODE_SOCKET", &socket_path);
+    }
+
+    let server = std::thread::spawn(move || fake_desktop_server_roundtrip(listener));
+
+    send_message_to_session(
+        "session_desktop_fake",
+        "workspace title",
+        "hello workspace without argv",
+    )?;
+
+    let requests = server.join().unwrap()?;
+
+    restore_env_var("JCODE_SOCKET", previous_socket);
+    let _ = std::fs::remove_file(&socket_path);
+
+    assert_eq!(requests[0]["target_session_id"], "session_desktop_fake");
+    assert_eq!(requests[2]["content"], "hello workspace without argv");
     Ok(())
 }
 
@@ -451,6 +719,77 @@ fn fake_desktop_server_reload_roundtrip(
 }
 
 #[cfg(unix)]
+fn fake_desktop_server_reload_session_mismatch(
+    listener: UnixListener,
+    new_listener: UnixListener,
+    new_socket_path: PathBuf,
+) -> Result<Vec<Value>> {
+    let (mut reader, mut writer, subscribe) = accept_first_requesting_client(&listener)?;
+    write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
+    write_json_line(&mut writer, json!({"type": "done", "id": subscribe["id"]}))?;
+
+    let state = read_fake_server_request(&mut reader)?;
+    write_json_line(
+        &mut writer,
+        json!({
+            "type": "state",
+            "id": state["id"],
+            "session_id": "session_desktop_reload_fake",
+            "message_count": 0,
+            "is_processing": false,
+        }),
+    )?;
+
+    let message = read_fake_server_request(&mut reader)?;
+    write_json_line(&mut writer, json!({"type": "ack", "id": message["id"]}))?;
+    write_json_line(
+        &mut writer,
+        json!({"type": "reloading", "new_socket": new_socket_path.display().to_string()}),
+    )?;
+    drop(writer);
+    drop(reader);
+
+    let (new_reader, mut new_writer, reconnect_subscribe) =
+        accept_first_requesting_client(&new_listener)?;
+    write_json_line(
+        &mut new_writer,
+        json!({
+            "type": "session",
+            "session_id": "session_desktop_wrong_reload_fake",
+        }),
+    )?;
+    drop(new_reader);
+
+    let _ = std::fs::remove_file(new_socket_path);
+    Ok(vec![subscribe, state, message, reconnect_subscribe])
+}
+
+#[cfg(unix)]
+fn fake_desktop_server_malformed_event(listener: UnixListener) -> Result<Vec<Value>> {
+    let (mut reader, mut writer, subscribe) = accept_first_requesting_client(&listener)?;
+    write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
+    write_json_line(&mut writer, json!({"type": "done", "id": subscribe["id"]}))?;
+
+    let state = read_fake_server_request(&mut reader)?;
+    write_json_line(
+        &mut writer,
+        json!({
+            "type": "state",
+            "id": state["id"],
+            "session_id": "session_desktop_malformed_fake",
+            "message_count": 0,
+            "is_processing": false,
+        }),
+    )?;
+
+    let message = read_fake_server_request(&mut reader)?;
+    write_json_line(&mut writer, json!({"type": "ack", "id": message["id"]}))?;
+    writer.write_all(b"not-json\n")?;
+    writer.flush()?;
+    Ok(vec![subscribe, state, message])
+}
+
+#[cfg(unix)]
 fn fake_desktop_server_multi_client_reload_roundtrip(
     listener: UnixListener,
     new_listener: UnixListener,
@@ -521,7 +860,7 @@ struct FakeReloadClientRequests {
 fn fake_desktop_server_accept_old_reload_client(
     listener: &UnixListener,
     session_id: &str,
-    new_socket_path: &PathBuf,
+    new_socket_path: &std::path::Path,
 ) -> Result<FakeReloadClientRequests> {
     let (mut reader, mut writer, subscribe) = accept_first_requesting_client(listener)?;
     write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
