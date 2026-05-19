@@ -846,6 +846,7 @@ pub async fn run_telegram_command(
                         "⏳ Jcode is working on your message...",
                     )
                     .await?;
+                    let progress_sent_at = tokio::time::Instant::now();
 
                     match run_single_message_command_capture_with_auto_poke(&mut agent, text).await
                     {
@@ -855,6 +856,7 @@ pub async fn run_telegram_command(
                                 &bot_token,
                                 &chat_id,
                                 progress_message_id,
+                                progress_sent_at,
                                 &reply,
                             )
                             .await?;
@@ -866,6 +868,7 @@ pub async fn run_telegram_command(
                                 &bot_token,
                                 &chat_id,
                                 progress_message_id,
+                                progress_sent_at,
                                 &format!("❌ Jcode failed: {err:#}"),
                             )
                             .await?;
@@ -883,18 +886,22 @@ pub async fn run_telegram_command(
 }
 
 const TELEGRAM_REPLY_MAX_CHARS: usize = 3900;
+const TELEGRAM_EDIT_MIN_DELAY_SECS: u64 = 10;
 
 async fn send_telegram_reply_chunks(
     client: &reqwest::Client,
     bot_token: &str,
     chat_id: &str,
     message_id: i64,
+    progress_sent_at: tokio::time::Instant,
     text: &str,
 ) -> Result<()> {
     let mut chunks = chunk_telegram_reply_text(text).into_iter();
     let Some(first_chunk) = chunks.next() else {
         return Ok(());
     };
+
+    wait_for_telegram_edit_delay(progress_sent_at).await;
 
     if let Err(err) =
         crate::telegram::edit_plain_message(client, bot_token, chat_id, message_id, &first_chunk)
@@ -928,6 +935,15 @@ fn chunk_telegram_reply_text(text: &str) -> Vec<String> {
         chunks.push(chunk);
     }
     chunks
+}
+
+async fn wait_for_telegram_edit_delay(progress_sent_at: tokio::time::Instant) {
+    let min_edit_at =
+        progress_sent_at + std::time::Duration::from_secs(TELEGRAM_EDIT_MIN_DELAY_SECS);
+    let now = tokio::time::Instant::now();
+    if min_edit_at > now {
+        tokio::time::sleep_until(min_edit_at).await;
+    }
 }
 
 fn run_command_auto_poke_enabled() -> bool {
